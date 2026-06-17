@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Speculative Decoding — Complete Reference</title>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>
+  body { font-family: Georgia, serif; max-width: 860px; margin: 40px auto; padding: 0 20px; line-height: 1.7; color: #1a1a1a; }
+  h1 { border-bottom: 3px solid #1a1a1a; padding-bottom: 10px; }
+  h2 { border-bottom: 1px solid #ccc; margin-top: 48px; }
+  h3 { margin-top: 32px; color: #333; }
+  .definition { background: #e8f0fe; border-left: 4px solid #1a73e8; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+  .theorem { background: #e6f4ea; border-left: 4px solid #137333; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+  .proof-toggle { background: #f1f3f4; border-left: 4px solid #888; padding: 12px 16px; margin: 8px 0; border-radius: 0 6px 6px 0; cursor: pointer; }
+  .proof-body { display: none; background: #fafafa; border-left: 4px solid #aaa; padding: 12px 16px; margin: 0 0 16px 0; }
+  .proof-body.open { display: block; }
+  .keyfacts { background: #fff8e1; border-left: 4px solid #f9ab00; padding: 12px 16px; margin: 24px 0; border-radius: 0 6px 6px 0; }
+  .keyfacts ul { margin: 4px 0; }
+  code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-family: monospace; }
+  .algo { background: #f8f8f8; border: 1px solid #ddd; padding: 16px; font-family: monospace; white-space: pre; border-radius: 6px; line-height: 1.5; }
+  nav { position: sticky; top: 0; background: white; padding: 8px 0; border-bottom: 1px solid #eee; margin-bottom: 32px; }
+  nav a { margin-right: 16px; color: #1a73e8; text-decoration: none; font-size: 0.9em; }
+</style>
+<script>
+function toggleProof(id) {
+  const el = document.getElementById(id);
+  el.classList.toggle('open');
+  const btn = el.previousElementSibling;
+  btn.textContent = el.classList.contains('open') ? '▼ Proof (click to collapse)' : '▶ Proof (click to expand)';
+}
+</script>
+</head>
+<body>
+
+<h1>Speculative Decoding — Complete Reference</h1>
+<p><em>Based on: Leviathan, Kalman, Matias. "Fast Inference from Transformers via Speculative Decoding." ICML 2023. (<a href="https://arxiv.org/abs/2211.17192">arXiv:2211.17192</a>)</em></p>
+
+<nav>
+  <a href="#s1">1. Why Slow</a>
+  <a href="#s2">2. Spec Execution</a>
+  <a href="#s3">3. Std Sampling</a>
+  <a href="#s4">4. Algorithm 1</a>
+  <a href="#s5">5. Spec Sampling Math</a>
+  <a href="#s6">6. Analysis</a>
+  <a href="#s7">7. Experiments</a>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="s1">1. Why Autoregressive Decoding Is Slow</h2>
+
+<p>A transformer language model generates text one token at a time. To generate \(K\) tokens:</p>
+<ol>
+  <li>Feed the full current sequence to the model (forward pass).</li>
+  <li>Get logits for the next token position.</li>
+  <li>Sample or argmax to select the next token.</li>
+  <li>Append that token and repeat — \(K\) times total.</li>
+</ol>
+
+<p>This requires \(K\) <strong>serial</strong> forward passes. Token \(i+1\) cannot be computed until token \(i\) is known, because the model is conditioned on the full prefix.</p>
+
+<h3>Memory Bandwidth Bottleneck</h3>
+
+<p>Modern LLMs are not compute-bound during inference — they are <strong>memory bandwidth-bound</strong>. Each forward pass must load the entire model weight matrix from GPU High Bandwidth Memory (HBM) to compute units. For a model with \(N\) parameters in 16-bit precision, each forward pass moves \(2N\) bytes through the memory bus. A single token generation step does \(\mathcal{O}(N)\) multiply-adds but transfers \(\mathcal{O}(N)\) bytes — so the arithmetic units are starved waiting for data.</p>
+
+<p>Consequence: the walltime for one forward pass is roughly <em>constant</em> regardless of batch size (up to a point). Running \(\gamma + 1\) sequences in a batch takes roughly the same time as running 1 — the extra arithmetic is "free" because arithmetic units were idle.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 1</strong>
+<ul>
+  <li>K tokens requires K serial forward passes. No shortcut without architecture changes.</li>
+  <li>Inference is memory-bandwidth-bound, not compute-bound. Arithmetic units sit idle.</li>
+  <li>Batching \(\gamma+1\) sequences costs roughly the same walltime as batching 1 — this is the foundation of speculative decoding's speedup.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s2">2. Speculative Execution</h2>
+
+<p><strong>Speculative execution</strong> is a classic CPU optimization: perform a task before you know if it's needed, betting that it will be. The canonical example is branch prediction — the CPU predicts which branch will be taken and begins executing it; if wrong, it discards the work.</p>
+
+<p>The paper generalizes this to the <em>stochastic</em> setting: a task might be needed with some probability \(p\). The core idea applied to LLMs:</p>
+
+<ol>
+  <li>Use a cheap <strong>draft model</strong> \(M_q\) to guess \(\gamma\) likely next tokens.</li>
+  <li>Run the expensive <strong>target model</strong> \(M_p\) in parallel on all \(\gamma+1\) possible prefixes.</li>
+  <li>Accept or reject draft tokens in a way that guarantees the final output distribution equals \(M_p\)'s distribution exactly.</li>
+</ol>
+
+<p>The bet: \(M_q\) is usually right, so \(M_p\)'s single batched pass generates multiple tokens instead of one.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 2</strong>
+<ul>
+  <li>Speculative execution: do work before you know it's needed, discard if wrong.</li>
+  <li>The draft model guesses; the target model verifies. Output distribution is <em>unchanged</em>.</li>
+  <li>Speedup comes from the target model's batch being nearly "free" compared to running it \(\gamma+1\) times serially.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s3">3. Standardized Sampling</h2>
+
+<p>The paper's algorithm only needs to reason about probability distributions \(p(x)\) and \(q(x)\) over the vocabulary. All practical sampling strategies can be cast into this framework by adjusting the logits before softmax:</p>
+
+<ul>
+  <li><strong>Greedy / argmax:</strong> Zero all non-maximum logits, normalize. The resulting distribution is a point mass on the argmax token.</li>
+  <li><strong>Top-k:</strong> Zero all but the top-\(k\) logits, normalize.</li>
+  <li><strong>Nucleus (top-p):</strong> Zero all tokens outside the smallest set whose cumulative probability exceeds \(p\), normalize.</li>
+  <li><strong>Temperature \(T\):</strong> Divide logits by \(T\) before softmax. \(T \to 0\) approaches argmax; \(T \to \infty\) approaches uniform.</li>
+</ul>
+
+<p>After applying any of these transformations, we have a valid probability distribution. The algorithm treats \(p(x)\) and \(q(x)\) as the <em>already-adjusted</em> distributions.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 3</strong>
+<ul>
+  <li>All sampling strategies reduce to sampling from an adjusted distribution over the vocabulary.</li>
+  <li>\(p(x)\) and \(q(x)\) in the algorithm are post-adjustment distributions, not raw logits.</li>
+  <li>Draft and target must use the <em>same</em> sampling strategy (both use the same temperature, top-k, etc.) for the algorithm to be valid.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s4">4. Algorithm 1 — Line-by-Line</h2>
+
+<h3>Notation</h3>
+<ul>
+  <li>\(M_p\): target model (expensive, the one we want to sample from)</li>
+  <li>\(M_q\): draft model (cheap approximation, same task)</li>
+  <li>\(\gamma\): number of draft tokens to speculate (hyperparameter)</li>
+  <li>\(p_i(x) = p(x \mid \text{prefix} + [x_1, \ldots, x_{i-1}])\): target distribution at position \(i\)</li>
+  <li>\(q_i(x)\): draft distribution at position \(i\)</li>
+  <li>\(\text{norm}(v)\): normalize vector \(v\) to sum to 1</li>
+</ul>
+
+<div class="algo">SpeculativeDecodingStep(Mp, Mq, prefix):
+
+  // Phase 1: Draft model generates γ tokens autoregressively
+  for i = 1 to γ:
+      q_i(x) ← Mq(prefix + [x₁, ..., x_{i-1}])   // draft distribution
+      x_i ~ q_i(x)                                   // sample draft token
+
+  // Phase 2: Target model evaluates all γ+1 prefixes IN PARALLEL
+  p₁(x), ..., p_{γ+1}(x) ← Mp(prefix),
+                              Mp(prefix + [x₁]),
+                              Mp(prefix + [x₁, x₂]),
+                              ...,
+                              Mp(prefix + [x₁, ..., x_γ])
+
+  // Phase 3: Rejection loop
+  r₁ ~ U(0,1), ..., r_γ ~ U(0,1)
+  n ← min({ i-1 | r_i > p_i(x_i)/q_i(x_i) } ∪ {γ})
+
+  // Phase 4: Adjust distribution (only if a token was rejected)
+  p'(x) ← p_{n+1}(x)
+  if n < γ:
+      p'(x) ← norm(max(0, p_{n+1}(x) - q_{n+1}(x)))
+
+  // Phase 5: Sample final token and return
+  t ~ p'(x)
+  return prefix + [x₁, ..., x_n, t]
+</div>
+
+<h3>Step-by-Step Explanation</h3>
+
+<p><strong>Phase 1 (Draft):</strong> The draft model generates \(\gamma\) tokens autoregressively. This is sequential but cheap. Each token \(x_i\) is sampled from \(q_i\), and the draft records the distribution \(q_i(x)\) at each step.</p>
+
+<p><strong>Phase 2 (Parallel target evaluation):</strong> The target model is called with a <em>batch</em> of \(\gamma+1\) sequences. The batch is:
+\[ [\text{prefix}], [\text{prefix}, x_1], [\text{prefix}, x_1, x_2], \ldots, [\text{prefix}, x_1, \ldots, x_\gamma] \]
+This costs roughly one target forward pass (sequences differ only in length by 1 token, and the memory bandwidth bottleneck means batching is nearly free).</p>
+
+<p><strong>Phase 3 (Rejection):</strong> For each draft token \(x_i\), we accept it with probability \(\min(1, p_i(x_i) / q_i(x_i))\). We draw a uniform \(r_i \sim U(0,1)\) and accept iff \(r_i \leq p_i(x_i)/q_i(x_i)\). The variable \(n\) is the index of the first rejection minus one (i.e., \(n\) tokens were accepted). If no rejection, \(n = \gamma\).</p>
+
+<p><strong>Phase 4 (Adjusted distribution):</strong> If any token was rejected (\(n < \gamma\)), we sample a <em>correction token</em> from the adjusted distribution \(p'(x) = \text{norm}(\max(0, p_{n+1}(x) - q_{n+1}(x)))\). This compensates for the bias introduced by the draft model having proposed the wrong token. If all tokens were accepted (\(n = \gamma\)), we sample a <em>bonus token</em> from \(p_{n+1}(x)\) — the target distribution after the last accepted draft token.</p>
+
+<p><strong>Why does this produce exactly \(p\)'s distribution?</strong> See Section 5. The key insight: the acceptance-rejection scheme ensures each output token follows \(M_p\)'s distribution exactly, regardless of \(M_q\).</p>
+
+<p><strong>Guaranteed minimum:</strong> We always produce at least 1 new token per call (the correction or bonus token from \(t \sim p'(x)\)). In the worst case (\(n=0\), first draft token rejected), we get exactly 1 token — same as autoregressive decoding. In the best case (\(n=\gamma\)), we get \(\gamma+1\) tokens.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 4</strong>
+<ul>
+  <li>Draft phase is sequential and cheap; target phase is one batched call (nearly free).</li>
+  <li>Each step produces 1 to \(\gamma+1\) tokens. Worst case = autoregressive decoding.</li>
+  <li>When a draft token is rejected, all subsequent draft computations for that step are discarded.</li>
+  <li>We always append exactly one token from the target model's distribution — either a correction (if rejected) or a bonus (if all accepted).</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s5">5. Speculative Sampling — Full Mathematical Treatment</h2>
+
+<h3>The Core Claim</h3>
+
+<p>We want to sample \(x \sim p(x)\) but only have efficient access to \(q(x)\). Speculative sampling does this:</p>
+<ol>
+  <li>Sample \(x \sim q(x)\)</li>
+  <li>Accept \(x\) with probability \(\min\!\left(1, \frac{p(x)}{q(x)}\right)\)</li>
+  <li>If rejected, sample \(x\) from \(p'(x) = \text{norm}(\max(0, p(x) - q(x)))\)</li>
+</ol>
+
+<div class="theorem">
+<strong>Claim:</strong> The output of this procedure is distributed as \(p(x)\).
+</div>
+
+<div class="proof-toggle" onclick="toggleProof('proof-spec-samp')">▶ Proof (click to expand)</div>
+<div class="proof-body" id="proof-spec-samp">
+<p>Let \(\alpha = \sum_x \min(p(x), q(x))\) be the probability that a draft sample is accepted. Then:</p>
+
+<p>\[P(\text{accept}) = \sum_x q(x) \cdot \min\!\left(1, \frac{p(x)}{q(x)}\right) = \sum_x \min(q(x), p(x)) = \alpha\]</p>
+
+<p>The output token \(t\) satisfies:</p>
+\[P(t = x) = \underbrace{q(x) \cdot \min\!\left(1, \frac{p(x)}{q(x)}\right)}_{\text{draft accepted}} + \underbrace{(1-\alpha) \cdot p'(x)}_{\text{resampled after rejection}}\]
+
+<p>The first term simplifies: \(q(x) \cdot \min(1, p(x)/q(x)) = \min(q(x), p(x))\).</p>
+
+<p>For the second term, \(p'(x) = \frac{\max(0, p(x) - q(x))}{1 - \alpha}\) (normalization constant is \(\sum_x \max(0, p(x)-q(x)) = \sum_x p(x) - \min(p(x), q(x)) = 1 - \alpha\)).</p>
+
+<p>So \((1-\alpha) \cdot p'(x) = \max(0, p(x) - q(x))\).</p>
+
+<p>Therefore:
+\[P(t = x) = \min(q(x), p(x)) + \max(0, p(x) - q(x))\]</p>
+
+<p>Case 1: \(p(x) \leq q(x)\). Then \(\min = p(x)\), \(\max = 0\). Sum \(= p(x)\). ✓</p>
+<p>Case 2: \(p(x) > q(x)\). Then \(\min = q(x)\), \(\max = p(x) - q(x)\). Sum \(= p(x)\). ✓</p>
+
+<p>In both cases \(P(t = x) = p(x)\). \(\blacksquare\)</p>
+</div>
+
+<h3>The DLK Divergence</h3>
+
+<div class="definition">
+<strong>Definition 3.2 (DLK divergence):</strong>
+\[D_{LK}(p, q) = \sum_x \left|q(x) - M(x)\right| \quad \text{where } M(x) = \frac{p(x) + q(x)}{2}\]
+</div>
+
+<div class="theorem">
+<strong>Lemma 3.3:</strong> \(D_{LK}(p, q) = 1 - \sum_x \min(p(x), q(x))\)
+</div>
+
+<div class="proof-toggle" onclick="toggleProof('proof-dlk')">▶ Proof (click to expand)</div>
+<div class="proof-body" id="proof-dlk">
+<p>\[D_{LK}(p,q) = \sum_x \left|q(x) - \frac{p(x)+q(x)}{2}\right| = \sum_x \frac{|p(x)-q(x)|}{2}\]</p>
+<p>\[= \frac{1}{2}\sum_x (p(x) + q(x) - 2\min(p(x),q(x))) = \frac{(1+1) - 2\sum_x\min(p(x),q(x))}{2} = 1 - \sum_x \min(p(x),q(x))\]</p>
+<p>\(\blacksquare\)</p>
+</div>
+
+<div class="theorem">
+<strong>Corollary 3.4:</strong> \(D_{LK}(p,q) \in [0,1]\), symmetric. \(D_{LK}=0 \Leftrightarrow p=q\). \(D_{LK}=1 \Leftrightarrow\) disjoint support.
+</div>
+
+<div class="definition">
+<strong>Definition 3.1 (Acceptance rate):</strong> \(\beta_{x_{<t}} = P(\text{accept draft token} \mid \text{prefix } x_{<t})\)
+</div>
+
+<div class="theorem">
+<strong>Theorem 3.5:</strong> \(\beta = 1 - D_{LK}(p, q)\)
+</div>
+
+<div class="proof-toggle" onclick="toggleProof('proof-beta')">▶ Proof (click to expand)</div>
+<div class="proof-body" id="proof-beta">
+<p>\[\beta = \mathbb{E}_{x \sim q}\!\left[\min\!\left(1, \frac{p(x)}{q(x)}\right)\right] = \sum_x q(x) \cdot \min\!\left(1, \frac{p(x)}{q(x)}\right) = \sum_x \min(p(x), q(x))\]</p>
+<p>By Lemma 3.3, \(\sum_x \min(p(x), q(x)) = 1 - D_{LK}(p,q)\). \(\blacksquare\)</p>
+</div>
+
+<div class="theorem">
+<strong>Corollary 3.6:</strong> \(\alpha = \mathbb{E}[\beta] = \mathbb{E}[\min(p, q)]\)
+</div>
+
+<p>This is the key metric: \(\alpha\) summarizes how well \(M_q\) approximates \(M_p\) across typical prefixes. \(\alpha \to 1\) means the draft is almost always accepted; \(\alpha \to 0\) means speculative decoding degenerates to autoregressive.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 5</strong>
+<ul>
+  <li>Speculative sampling is exact: output distribution equals \(p(x)\) regardless of \(q(x)\).</li>
+  <li>The adjusted distribution \(p'(x) = \text{norm}(\max(0, p-q))\) compensates for the draft model's bias.</li>
+  <li>\(\alpha = \mathbb{E}[\sum_x \min(p(x), q(x))]\): the expected probability mass where draft and target agree.</li>
+  <li>\(\alpha = 1 - \mathbb{E}[D_{LK}(p,q)]\): higher divergence between models → lower acceptance rate → less speedup.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s6">6. Analysis</h2>
+
+<h3>Expected Tokens Per Iteration</h3>
+
+<p>Let \(\alpha = \mathbb{E}[\beta]\) (mean acceptance rate, assumed i.i.d. per position). In one call to Algorithm 1, the number of accepted draft tokens follows a <em>capped geometric distribution</em>: we accept each token independently with probability \(\alpha\), and stop at the first rejection or at \(\gamma\). Plus one bonus/correction token always.</p>
+
+<p>Let \(N\) = number of accepted draft tokens (before the correction/bonus). Then \(N \in \{0, 1, \ldots, \gamma\}\) with:
+\[P(N = k) = \begin{cases} \alpha^k (1-\alpha) & k < \gamma \\ \alpha^\gamma & k = \gamma \end{cases}\]</p>
+
+<p>Total tokens per step = \(N + 1\) (draft tokens accepted + 1 correction/bonus). Thus:</p>
+
+<div class="theorem">
+<strong>Equation 1:</strong>
+\[\mathbb{E}[\text{tokens per step}] = 1 + \mathbb{E}[N] = \frac{1 - \alpha^{\gamma+1}}{1 - \alpha}\]
+</div>
+
+<div class="proof-toggle" onclick="toggleProof('proof-tokens')">▶ Derivation (click to expand)</div>
+<div class="proof-body" id="proof-tokens">
+<p>\[\mathbb{E}[N] = \sum_{k=0}^{\gamma-1} k \cdot \alpha^k(1-\alpha) + \gamma \cdot \alpha^\gamma\]</p>
+<p>Let \(S = \sum_{k=0}^\gamma k \cdot \alpha^k (1-\alpha)\) (geometric series derivative):</p>
+<p>\[\sum_{k=0}^{\gamma} \alpha^k = \frac{1 - \alpha^{\gamma+1}}{1-\alpha}\]</p>
+<p>\[\mathbb{E}[N+1] = \mathbb{E}[N] + 1 = \sum_{k=0}^{\gamma}(k+1) P(N=k) = \sum_{j=1}^{\gamma+1} j \cdot P(N=j-1)\]</p>
+<p>Equivalently: \(\mathbb{E}[N+1] = \sum_{k=0}^\gamma P(N \geq k) = \sum_{k=0}^\gamma \alpha^k = \frac{1-\alpha^{\gamma+1}}{1-\alpha}\). \(\blacksquare\)</p>
+</div>
+
+<h3>Walltime Improvement</h3>
+
+<div class="definition">
+<strong>Definition 3.7 (Cost coefficient):</strong> \(c = \frac{\text{walltime of one } M_q \text{ run}}{\text{walltime of one } M_p \text{ run}}\)
+</div>
+
+<p>In practice, \(M_q\) is orders of magnitude smaller than \(M_p\), so \(c \ll 1\) (often \(c < 0.05\)).</p>
+
+<div class="theorem">
+<strong>Theorem 3.8 (Walltime speedup):</strong>
+\[\text{speedup} = \frac{1 - \alpha^{\gamma+1}}{(1-\alpha)(\gamma c + 1)}\]
+</div>
+
+<div class="proof-toggle" onclick="toggleProof('proof-walltime')">▶ Proof (click to expand)</div>
+<div class="proof-body" id="proof-walltime">
+<p>Let \(T\) = walltime of one \(M_p\) forward pass. Each call to Algorithm 1 costs:</p>
+<ul>
+  <li>\(\gamma c T\): running \(M_q\) for \(\gamma\) steps</li>
+  <li>\(T\): one batched \(M_p\) call (the \(\gamma+1\) parallel evaluations cost ~1 pass due to batching)</li>
+</ul>
+<p>Total cost per step: \((\gamma c + 1)T\). Expected tokens per step: \(\frac{1-\alpha^{\gamma+1}}{1-\alpha}\).</p>
+<p>Cost per token with Algorithm 1: \(\frac{(\gamma c + 1)(1-\alpha)}{1-\alpha^{\gamma+1}} T\).</p>
+<p>Cost per token with autoregressive: \(T\). Speedup = ratio. \(\blacksquare\)</p>
+</div>
+
+<div class="theorem">
+<strong>Corollary 3.9:</strong> If \(\alpha > c\), there exists \(\gamma > 0\) giving speedup. Minimum speedup (at \(\gamma=1\)) is \(\frac{1+\alpha}{1+c}\).
+</div>
+
+<h3>Arithmetic Operations</h3>
+
+<div class="theorem">
+<strong>Theorem 3.11:</strong> The expected factor increase in arithmetic operations is:
+\[\frac{(1-\alpha)(\gamma\hat{c} + \gamma + 1)}{1 - \alpha^{\gamma+1}}\]
+where \(\hat{c}\) = ratio of FLOPs per token for \(M_q\) vs \(M_p\).
+</div>
+
+<p>Note: walltime speedup and arithmetic savings are different! Speculative decoding can increase total FLOPs slightly (rejected drafts waste compute) while still improving walltime (because of the memory bandwidth bottleneck).</p>
+
+<h3>Optimal γ</h3>
+
+<p>Theorem 3.8 gives speedup as a function of \(\gamma\). Maximizing over \(\gamma\) (treating \(\gamma\) as continuous, differentiating, setting to zero) gives an implicit equation. In practice, the optimal \(\gamma\) is found empirically by sweeping values of \(\gamma\) and measuring walltime.</p>
+
+<p><strong>Worked example:</strong> \(\alpha = 0.75\), \(c = 0.03\).</p>
+<ul>
+  <li>At \(\gamma=4\): speedup \(= \frac{1-0.75^5}{(1-0.75)(4 \times 0.03 + 1)} = \frac{1-0.237}{0.25 \times 1.12} \approx \frac{0.763}{0.280} \approx 2.73\times\)</li>
+  <li>At \(\gamma=7\): speedup \(= \frac{1-0.75^8}{(0.25)(7 \times 0.03 + 1)} \approx \frac{0.900}{0.303} \approx 2.97\times\)</li>
+  <li>At \(\gamma=12\): speedup \(\approx \frac{0.968}{0.340} \approx 2.85\times\) — diminishing returns, overhead grows</li>
+</ul>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 6</strong>
+<ul>
+  <li>\(\mathbb{E}[\text{tokens/step}] = (1-\alpha^{\gamma+1})/(1-\alpha)\). Derivation: sum of probabilities of \(N \geq k\).</li>
+  <li>Walltime speedup = (expected tokens per step) / (normalized step cost). This factors as Theorem 3.8.</li>
+  <li>Condition for speedup: \(\alpha > c\) (draft quality must exceed its relative cost).</li>
+  <li>Speculative decoding may use <em>more</em> total FLOPs but still be faster (memory bandwidth is the bottleneck, not FLOPs).</li>
+  <li>Optimal \(\gamma\) balances increased expected tokens vs. increased draft overhead.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s7">7. Experiments Summary</h2>
+
+<p>The paper evaluates on three settings:</p>
+
+<table border="1" cellpadding="6" style="border-collapse:collapse; width:100%; margin:16px 0;">
+<tr><th>Task</th><th>Target Model</th><th>Draft Model</th><th>Observed α</th><th>Walltime Speedup</th></tr>
+<tr><td>Unconditional LM (lm1b)</td><td>GPT-like 97M</td><td>GPT-like 6M</td><td>~0.7–0.8</td><td>~2x</td></tr>
+<tr><td>Translation (En→De)</td><td>T5-XXL 11B</td><td>T5-Small/Base</td><td>~0.7–0.8</td><td>2.4x</td></tr>
+<tr><td>Summarization</td><td>T5-XXL 11B</td><td>T5-Small/Base</td><td>~0.8+</td><td>3.1x</td></tr>
+<tr><td>Dialog</td><td>LaMDA 137B</td><td>LaMDA 2B</td><td>~0.8</td><td>~2x</td></tr>
+</table>
+
+<p><strong>Key observations:</strong></p>
+<ul>
+  <li>Summarization has higher \(\alpha\) than translation because there is less creative freedom — the draft and target tend to agree more.</li>
+  <li>The speedup is not as high as \(\mathbb{E}[\text{tokens/step}]\) suggests because of infrastructure overhead (communication, batching, attention mask handling).</li>
+  <li>The method requires no retraining or architecture changes to either model.</li>
+  <li>In memory-bandwidth-constrained settings (single accelerator), speedups are higher. In compute-constrained settings (large batch inference), speedups are lower.</li>
+</ul>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 7</strong>
+<ul>
+  <li>Real-world α ≈ 0.7–0.8 for tasks where draft and target share training distribution.</li>
+  <li>Observed speedups: 2–3x on T5-XXL, consistent with Theorem 3.8 predictions.</li>
+  <li>Higher α on tasks with less creative freedom (summarization > translation > open-ended generation).</li>
+</ul>
+</div>
+
+</body>
+</html>
