@@ -766,14 +766,24 @@ Expected: no errors; output includes `TEST 3 PASSED` and
 ```bash
 .venv/bin/python -c "
 import torch
+from src.llm_pipeline.model import GPTModel
 ckpt = torch.load('data/checkpoints/llm_training_pipeline/sft_model.pt', weights_only=False)
-n_params = sum(v.numel() for v in ckpt['model_state_dict'].values())
+model = GPTModel(ckpt['config'])
+model.load_state_dict(ckpt['model_state_dict'])
+n_params = sum(p.numel() for p in model.parameters())
 assert n_params == 13817856
 print('sft_model.pt checkpoint OK, param count', n_params)
 "
 ```
 
 Expected: `sft_model.pt checkpoint OK, param count 13817856`
+
+Note: count via `model.parameters()` after `load_state_dict`, not
+`sum(v.numel() for v in state_dict.values())` — `GPTModel` ties
+`lm_head.weight` to `tok_emb.weight`, and a raw `state_dict()` lists tied
+parameters under both names (no dedup), which inflates the count to
+16,889,856 and makes this assertion fail even though the checkpoint and
+weight tying are both correct (same underlying storage for both names).
 
 - [ ] **Step 4: Commit**
 
