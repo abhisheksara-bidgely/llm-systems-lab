@@ -464,8 +464,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 JUDGE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 print(f"Loading judge model {JUDGE_MODEL} (first run downloads ~3GB, may take a few minutes)...")
 judge_tokenizer = AutoTokenizer.from_pretrained(JUDGE_MODEL)
+# low_cpu_mem_usage=True loads weights directly into the target dtype via
+# accelerate's meta-device path instead of materializing a full fp32 copy on
+# CPU first — needed on memory-constrained machines (this pipeline's dev box
+# has 7.6GB RAM total) where the naive load pattern can trigger the Linux
+# OOM killer while loading a ~3GB fp16 model.
 judge_model = AutoModelForCausalLM.from_pretrained(
-    JUDGE_MODEL, torch_dtype=torch.float16 if device == 'cuda' else torch.float32
+    JUDGE_MODEL,
+    torch_dtype=torch.float16 if device == 'cuda' else torch.float32,
+    low_cpu_mem_usage=True,
 ).to(device)
 judge_model.eval()
 print("Judge model loaded")
