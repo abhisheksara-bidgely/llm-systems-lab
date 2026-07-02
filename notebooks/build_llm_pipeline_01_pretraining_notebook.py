@@ -62,7 +62,67 @@ os.makedirs(CKPT_DIR, exist_ok=True)
 torch.manual_seed(0)
 """))
 
-# Parts 1-5 are appended here by Tasks 6-10.
+# ─── PART 1: TOKENIZER ───────────────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 1: BPE Tokenizer
+
+Language models operate on integer token ids, not raw text. We train a
+byte-level BPE tokenizer (same family as GPT-2's tokenizer) on a sample of
+TinyStories, vocab size 8000. Byte-level BPE can represent *any* input
+string (it falls back to raw bytes for unseen sequences), so there is no
+"unknown token" problem.
+"""))
+
+cells.append(code("""
+print("Loading TinyStories (train[:50000])...")
+ds = load_dataset('roneneldan/TinyStories', split='train[:50000]')
+texts = [x['text'] for x in ds]
+print(f"{len(texts)} stories loaded")
+
+tok_train_path = f"{CKPT_DIR}/tinystories_tok_train.txt"
+with open(tok_train_path, 'w') as f:
+    f.write('\\n'.join(texts[:20000]))
+
+tokenizer = ByteLevelBPETokenizer()
+tokenizer.train(
+    files=[tok_train_path], vocab_size=8000, min_frequency=2,
+    special_tokens=['<|endoftext|>'],
+)
+EOT_ID = tokenizer.token_to_id('<|endoftext|>')
+print(f"Vocab size: {tokenizer.get_vocab_size()}, EOT id: {EOT_ID}")
+"""))
+
+cells.append(code("""
+# TEST 1: tokenizer roundtrip + vocab size
+test_strings = [
+    "Once upon a time, there was a little girl named Lily.",
+    "The dog ran to the park and played with a ball.",
+    "\\"I am happy,\\" said Tom. \\"Let's go home!\\"",
+]
+for s in test_strings:
+    ids = tokenizer.encode(s).ids
+    decoded = tokenizer.decode(ids)
+    assert decoded.strip() == s.strip(), f"roundtrip mismatch: {s!r} -> {decoded!r}"
+    print(f"  OK ({len(ids)} tokens): {s[:40]}...")
+
+assert tokenizer.get_vocab_size() == 8000
+print("TEST 1 PASSED — tokenizer roundtrip and vocab size verified")
+"""))
+
+cells.append(md("""
+### Question 1
+
+**Why does a byte-level BPE tokenizer never need an "unknown token"?** What
+would happen with a purely word-level tokenizer (split on whitespace, one id
+per unique word) applied to text containing a word it never saw during
+tokenizer training?
+
+*Write your answer below (double-click this cell to edit):*
+
+"""))
+
+# Parts 2-5 are appended here.
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
