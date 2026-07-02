@@ -195,9 +195,10 @@ training order).
 **Well-regularized:** the curve traces a roughly monotonic path up and to the
 right — as KL grows step over step, reward grows with it, and the curve
 doesn't visibly bend back down or plateau sharply within the training run.
-This is what this pipeline's 150-step, `kl_beta=0.1` PPO run is designed to
-produce: not enough steps, and enough KL penalty, that the policy hasn't yet
-reached the region where the reward model's proxy-ness becomes exploitable.
+By this *curve-shape* criterion alone, this pipeline's 150-step, `kl_beta=0.1`
+PPO run qualifies: reward rose steadily (mean reward roughly 1.6 → 7.1 over
+the run) and KL stayed bounded (peaking around 1.26, well under the
+notebook's own 2.0 sanity threshold) — no visible turnover or plateau.
 
 **Overoptimized:** the curve would climb for a while and then visibly
 flatten or turn over — later-training points sit *below and to the right* of
@@ -212,14 +213,23 @@ own trajectory, not whether it has decoupled from "true" quality; that
 decoupling would only be visible via the judge comparisons in Part 1 of this
 notebook, or by direct human/qualitative reading of the generations).
 
-**Practical implication for reading this pipeline's specific plot:** because
-the same reward model produces both the training signal and the plotted
-curve, a smoothly rising curve is a *necessary but not sufficient* condition
-for "PPO worked well" — it confirms the optimization succeeded at raising the
-proxy reward, not that the proxy reward remained a faithful stand-in for
-story quality throughout. The judge-based win-rate comparison in this
-notebook's Part 1 is what actually tests the latter, using a signal
-independent of the training loop.
+**Practical implication for reading this pipeline's specific plot — and why
+this isn't hypothetical here:** because the same reward model produces both
+the training signal and the plotted curve, a smoothly rising curve is a
+*necessary but not sufficient* condition for "PPO worked well" — it confirms
+the optimization succeeded at raising the proxy reward, not that the proxy
+reward remained a faithful stand-in for story quality throughout. This
+pipeline's own run is a concrete instance of exactly that gap: the curve
+looks well-regularized by shape, yet Notebook 4's qualitative SFT-vs-PPO-vs-DPO
+comparison found the PPO checkpoint's completions are repetitive and
+lower-coherence (broken grammar, repeated names) despite scoring near-maximal
+on the sentiment classifier — the reward model rewarded surface-level
+positive-word density, not actual story quality, exactly as Q&A 14 warned.
+A "good-looking" reward-vs-KL curve and a genuinely reward-hacked policy are
+not mutually exclusive; the judge-based win-rate comparison in this
+notebook's Part 1 is what actually catches the latter, using a signal
+independent of the training loop, and it's why that comparison doesn't
+hard-require PPO to beat SFT here.
 
 ---
 
