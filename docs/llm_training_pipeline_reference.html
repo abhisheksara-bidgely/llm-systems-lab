@@ -673,13 +673,22 @@ training rather than used to shape it.</p>
 
 <div class="definition">
 <strong>Position bias.</strong> LLM judges are empirically biased toward whichever
-completion is shown <em>first</em> in the prompt, independent of actual quality (Zheng et
+completion is shown in a particular position, independent of actual quality (Zheng et
 al. 2023, "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena", document this
 directly). The standard mitigation — used here — is to present every pair to the judge
-<strong>twice</strong>, once in each order, and only count a confident win if the judge
-picks the <em>same</em> completion regardless of position. If the judge flips its answer
-depending on order, that comparison contributes no reliable preference signal and is
-treated as a tie/discard rather than counted toward either model's win-rate.</div>
+<strong>twice</strong>, once in each order, and combine the two results. The simplest
+version of this (only count a win if the judge's generated answer is identical across both
+orderings, otherwise discard as a tie) breaks down if the bias is strong: this pipeline's
+actual judge model turns out to prefer whichever completion is shown second with high
+confidence regardless of content, so exact-agreement would discard nearly every comparison
+as a tie, leaving no usable signal. The fix used here instead reads the judge's raw
+log-probability preference for "A" over "B" in each ordering and <em>subtracts</em> the two
+orderings' margins — if position bias is a roughly content-independent additive offset in
+log-odds space, it cancels exactly in the subtraction (each ordering's margin is
+<code>true_preference &plusmn; bias</code>, with the sign of the true-preference term
+flipping between orderings while the bias term does not), leaving twice the actual
+content-driven preference. This is a graded correction, not merely a detect-and-discard
+one.</div>
 
 <h3>Verbosity Bias</h3>
 
@@ -715,8 +724,10 @@ keeps climbing while qualitative generations degrade would show.</div>
   <li>Pairwise LLM-as-judge comparison reuses Bradley-Terry's relative-judgment structure,
   but with an independent judge model, applied only after training (not used to shape a
   reward signal).</li>
-  <li>Position bias is controlled by presenting every pair in both orderings and discarding
-  comparisons where the judge's answer flips.</li>
+  <li>Position bias is controlled by presenting every pair in both orderings and combining
+  the two log-probability preference margins by subtraction, which cancels an additive
+  positional offset — more robust than discarding comparisons outright when the bias is
+  strong.</li>
   <li>Verbosity bias means win-rate differences should be read alongside completion length,
   not treated as a pure quality signal in isolation.</li>
   <li>A reward-vs-KL curve visualizes the same overoptimization risk as Goodhart's law —
