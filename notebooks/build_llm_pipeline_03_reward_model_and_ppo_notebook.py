@@ -537,7 +537,146 @@ keeping completions short in this pipeline's setting?
 
 """))
 
-# Part 4 is appended here.
+# ─── PART 4: PPO TRAINING LOOP ───────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 4: PPO Training Loop
+
+Trains a fresh copy of `sft_model` (the "policy") against the frozen reward model, with a
+frozen copy of `sft_model` as the KL reference. Each step: sample a batch of prompts,
+generate a rollout, score it with the reward model, compute GAE advantages, then take
+several clipped-objective gradient steps on the same rollout. Logs mean reward and mean KL
+per step to `ppo_training_log.json` for Notebook 5.
+"""))
+
+cells.append(code("""
+policy = PPOActorCritic(copy.deepcopy(sft_model)).to(device)
+ref_model = copy.deepcopy(sft_model).to(device)
+for p in ref_model.parameters():
+    p.requires_grad_(False)
+ref_model.eval()
+print(f"PPO policy params (incl. value head): {sum(p.numel() for p in policy.parameters()):,}")
+"""))
+
+cells.append(code("""
+ppo_steps = 150
+ppo_epochs = 2
+batch_size = 16
+max_new_tokens = 40
+gamma, lam = 1.0, 0.95
+clip_eps = 0.2
+kl_beta = 0.1
+value_coef = 0.5
+lr = 1e-5
+
+opt = torch.optim.AdamW(policy.parameters(), lr=lr)
+mean_rewards, mean_kls = [], []
+t0 = time.time()
+for step in range(ppo_steps):
+    topic_idx = torch.randint(0, len(TOPIC_KEYWORDS), (batch_size,))
+    topics = [TOPIC_KEYWORDS[i] for i in topic_idx]
+    prompts = [format_sft_prompt(t) for t in topics]
+    prompt_id_lists = [tokenizer.encode(p).ids for p in prompts]
+    prompt_len = max(len(p) for p in prompt_id_lists)
+    padded = [[EOT_ID] * (prompt_len - len(p)) + p for p in prompt_id_lists]
+    prompt_ids = torch.tensor(padded, device=device)
+
+    idx, policy_lp, ref_lp, values = generate_rollout(
+        policy, ref_model, prompt_ids, max_new_tokens, temperature=1.0, top_k=40, block_size=BLOCK_SIZE
+    )
+    completions = [tokenizer.decode(idx[i, prompt_len:].tolist()) for i in range(batch_size)]
+    with torch.no_grad():
+        full = [encode_pair_text(prompts[i], completions[i], BLOCK_SIZE) for i in range(batch_size)]
+        full_ids = torch.stack([f[0] for f in full]).to(device)
+        full_lens = torch.tensor([f[1] for f in full], device=device)
+        terminal_rewards = reward_model(full_ids, full_lens)
+
+    token_rewards, kl = compute_token_rewards(policy_lp, ref_lp, terminal_rewards, kl_beta)
+    advantages, returns = compute_gae(token_rewards, values, gamma, lam)
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    old_logprobs = policy_lp
+
+    for _ in range(ppo_epochs):
+        new_logprobs, new_values = evaluate_actions(policy, idx, prompt_len, max_new_tokens)
+        policy_loss = ppo_clipped_loss(new_logprobs, old_logprobs, advantages, clip_eps)
+        value_loss = F.mse_loss(new_values, returns)
+        loss = policy_loss + value_coef * value_loss
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        opt.step()
+
+    mean_reward = terminal_rewards.mean().item()
+    mean_kl = kl.mean().item()
+    mean_rewards.append(mean_reward)
+    mean_kls.append(mean_kl)
+    if step % 15 == 0 or step == ppo_steps - 1:
+        print(f"step {step:4d} | mean_reward {mean_reward:+.3f} | mean_kl {mean_kl:.4f} | elapsed {time.time()-t0:.0f}s")
+
+print(f"PPO training elapsed: {time.time()-t0:.1f}s")
+"""))
+
+cells.append(code("""
+with open(f"{CKPT_DIR}/ppo_training_log.json", 'w') as f:
+    json.dump({'mean_rewards': mean_rewards, 'mean_kls': mean_kls}, f)
+print(f"Saved PPO training log to {CKPT_DIR}/ppo_training_log.json")
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+ax1.plot(mean_rewards); ax1.set_xlabel('PPO step'); ax1.set_ylabel('mean reward-model score'); ax1.set_title('Reward over training')
+ax2.plot(mean_kls); ax2.set_xlabel('PPO step'); ax2.set_ylabel('mean per-token KL(policy || ref)'); ax2.set_title('KL over training')
+plt.tight_layout(); plt.show()
+"""))
+
+cells.append(code("""
+# TEST 7: reward-model score rises over training while KL stays bounded
+first_20_avg_r = sum(mean_rewards[:20]) / 20
+last_20_avg_r = sum(mean_rewards[-20:]) / 20
+print(f"first-20 mean reward: {first_20_avg_r:.3f}, last-20 mean reward: {last_20_avg_r:.3f}")
+assert last_20_avg_r > first_20_avg_r, "reward did not increase over PPO training"
+
+max_kl = max(mean_kls)
+print(f"max mean KL over training: {max_kl:.4f}")
+assert max_kl < 2.0, f"KL grew unexpectedly large ({max_kl:.4f}) — policy may have collapsed away from reference"
+print("TEST 7 PASSED — reward increased over training while KL stayed bounded")
+"""))
+
+cells.append(code("""
+# Qualitative comparison: SFT vs PPO completions on held-out topics
+policy.eval()
+for topic in ["dragon", "picnic", "robot"]:
+    prompt = format_sft_prompt(topic)
+    prompt_ids = torch.tensor([tokenizer.encode(prompt).ids], device=device)
+    with torch.no_grad():
+        sft_out = sft_model.generate(prompt_ids, max_new_tokens=40, temperature=0.8, top_k=40)
+        ppo_out = policy.gpt.generate(prompt_ids, max_new_tokens=40, temperature=0.8, top_k=40)
+    print(f"=== topic: {topic} ===")
+    print("SFT:", tokenizer.decode(sft_out[0].tolist()))
+    print("PPO:", tokenizer.decode(ppo_out[0].tolist()))
+    print(f"  sentiment — SFT: {sentiment_score(tokenizer.decode(sft_out[0, prompt_ids.shape[1]:].tolist())):+.3f}, "
+          f"PPO: {sentiment_score(tokenizer.decode(ppo_out[0, prompt_ids.shape[1]:].tolist())):+.3f}")
+    print()
+policy.train()
+"""))
+
+cells.append(md("""
+### Question 4
+
+Compare the SFT and PPO completions and their sentiment scores above. Beyond "the sentiment
+score went up", does the PPO output still read as a coherent story about the stated topic,
+or do you see early signs of reward hacking (Section 5) — e.g. generic positive-sentiment
+phrases inserted somewhat independent of the story's actual content? What would you check
+next (only 150 PPO steps were run here) if you wanted to know whether more training would
+make this better or worse?
+
+*Write your answer below:*
+
+"""))
+
+cells.append(code("""
+ckpt_path = f"{CKPT_DIR}/ppo_model.pt"
+torch.save({'model_state_dict': policy.gpt.state_dict(), 'config': sft_cfg}, ckpt_path)
+print(f"Saved PPO checkpoint to {ckpt_path}")
+"""))
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
