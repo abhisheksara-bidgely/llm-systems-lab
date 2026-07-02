@@ -45,6 +45,7 @@ re-derived here.</em></p>
   <a href="#s1">1. Pipeline Overview</a>
   <a href="#s2">2. Transformer Architecture</a>
   <a href="#s3">3. Pretraining</a>
+  <a href="#s4">4. SFT</a>
 </nav>
 
 <!-- ============================================================ -->
@@ -275,6 +276,71 @@ often a bigger lever than architecture changes.</p>
   size})\) at initialization.</li>
   <li>Small-model coherence here is a property of TinyStories' controlled distribution, not a
   refutation of scaling laws.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s4">4. Supervised Fine-Tuning (SFT)</h2>
+
+<p>The base (pretrained) model is fluent but has no notion of "follow this instruction" — it was
+only ever trained to continue whatever text it's given, and a raw TinyStories corpus contains no
+consistent prompt/response structure to imitate. SFT teaches that structure by continuing the
+<em>same</em> next-token objective, but on <code>(prompt, response)</code> pairs and with the loss
+restricted to the response tokens.</p>
+
+<h3>Prompt-Loss-Masking</h3>
+
+<p>Each training example is still one token sequence — prompt tokens followed by response
+tokens — but the cross-entropy loss is only computed at positions predicting a response token:</p>
+
+\[\mathcal{L}_{\text{SFT}}(\theta) = -\sum_{t \,:\, t+1 \,\in\, \text{response}} \log P_\theta(x_{t+1} \mid x_{\le t})\]
+
+<p>Concretely, the target label at position \(t\) is set to a special <code>ignore_index</code>
+(\(-100\) here, matching PyTorch's <code>F.cross_entropy</code> default) whenever the token it
+would predict falls inside the prompt (or padding); only response-token predictions contribute
+gradient.</p>
+
+<div class="definition">
+<strong>Why mask the prompt at all?</strong> Without masking, the model is also trained to predict
+the prompt text itself, i.e. to <em>generate topics</em> rather than <em>respond to them</em>.
+Prompts are drawn from a small, structured template space (here, a fixed
+<code>"Write a short story about {topic}:\n"</code> format) — training on their tokens teaches
+nothing generalizable and dilutes gradient signal that should be spent on the actual skill being
+taught: producing a good response given a prompt. Worse, at inference the prompt is always given,
+never generated — spending training loss on "predicting" it optimizes a capability that is never
+exercised at generation time.</div>
+
+<h3>Why SFT "Unlocks" Instruction-Following</h3>
+
+<p>The pretrained model already contains the capability to write a coherent short story — that
+was the entire pretraining objective. What it lacks is the <em>behavior</em> of treating a
+specific textual pattern (an instruction) as a cue to switch into "respond" mode rather than
+"continue this text as if it were more of the same" mode. Because the underlying capability is
+already present, SFT typically needs a comparatively small number of examples and gradient steps
+to elicit reliable instruction-following — it is teaching a behavioral trigger on top of existing
+capability, not teaching new capability from scratch. This is the same "capability vs. alignment"
+distinction introduced in Section 1.</p>
+
+<h3>Catastrophic Forgetting and the Low-LR Rationale</h3>
+
+<p>SFT continues training the same weights that pretraining produced, on a much smaller and much
+narrower dataset. A learning rate anywhere near the pretraining peak LR risks
+<strong>catastrophic forgetting</strong>: large gradient steps on a narrow data distribution can
+overwrite the broader linguistic competence pretraining spent many more steps building, in favor
+of overfitting to the SFT set's narrow templates. SFT therefore uses a peak LR roughly one to two
+orders of magnitude below the pretraining peak LR (\(3\times10^{-5}\) here vs. pretraining's
+\(3\times10^{-4}\)) and comparatively few steps — enough to shift the output <em>distribution</em>
+toward instruction-following, not enough to erase what pretraining already learned.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 4</strong>
+<ul>
+  <li>SFT is the same next-token cross-entropy objective as pretraining, restricted to response
+  tokens via <code>ignore_index</code> masking on the prompt.</li>
+  <li>SFT elicits an existing capability (coherent generation) into a new behavior
+  (instruction-following); it is comparatively cheap because it is not teaching new knowledge.</li>
+  <li>A much lower LR than pretraining is used specifically to avoid catastrophic forgetting on
+  the narrower SFT distribution.</li>
 </ul>
 </div>
 
