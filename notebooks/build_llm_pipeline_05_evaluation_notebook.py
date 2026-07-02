@@ -207,7 +207,110 @@ this, how much weight should Part 2's judge-based win-rates actually carry versu
 
 """))
 
-# Parts 2-3 are appended here.
+# ─── PART 2: WIN-RATES ────────────────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 2: SFT vs PPO vs DPO Win-Rates
+
+Compares each pair of models on the same 10 held-out topics (not used to build Part 3's
+preference dataset's prompt sampling order, though the same topic *vocabulary* — TinyStories
+has too small a natural topic space to hold out entirely-unseen topics at this model scale).
+"""))
+
+cells.append(code("""
+held_out_topics = TOPIC_KEYWORDS[-10:]
+held_out_prompts = [format_sft_prompt(t) for t in held_out_topics]
+
+@torch.no_grad()
+def generate_completion(model, prompt, max_new_tokens=40):
+    prompt_ids = torch.tensor([tokenizer.encode(prompt).ids], device=device)
+    out = model.generate(prompt_ids, max_new_tokens=max_new_tokens, temperature=0.8, top_k=40)
+    return tokenizer.decode(out[0, prompt_ids.shape[1]:].tolist())
+
+
+def compute_win_rate(model_a, model_b, name_a, name_b, prompts):
+    a_wins, b_wins, ties = 0, 0, 0
+    for prompt in prompts:
+        comp_a = generate_completion(model_a, prompt)
+        comp_b = generate_completion(model_b, prompt)
+        result = judge_pair_both_orders(prompt, comp_a, comp_b)
+        if result == 1:
+            a_wins += 1
+        elif result == -1:
+            b_wins += 1
+        else:
+            ties += 1
+    n = len(prompts)
+    print(f"{name_a} vs {name_b}: {name_a} wins {a_wins}/{n} ({a_wins/n:.1%}), "
+          f"{name_b} wins {b_wins}/{n} ({b_wins/n:.1%}), "
+          f"ties/position-bias {ties}/{n} ({ties/n:.1%})")
+    return a_wins / n, b_wins / n, ties / n
+"""))
+
+cells.append(code("""
+sft_vs_ppo = compute_win_rate(ppo_model, sft_model, "PPO", "SFT", held_out_prompts)
+sft_vs_dpo = compute_win_rate(dpo_model, sft_model, "DPO", "SFT", held_out_prompts)
+ppo_vs_dpo = compute_win_rate(ppo_model, dpo_model, "PPO", "DPO", held_out_prompts)
+"""))
+
+cells.append(code("""
+# TEST 2: structural check only (all three comparisons ran and produced valid win/tie
+# rates that sum to 1.0) — NOT a hard requirement that any particular model wins. Part 1's
+# TEST 1 already found this judge model/prompt combination gives an unreliable verdict on
+# a fraction of even obviously-one-sided pairs, so a judge-based win-rate here is reported
+# as exploratory evidence alongside Notebook 4's oracle sentiment-score comparison, not
+# asserted as the deciding signal — forcing a pass/fail threshold on a signal already shown
+# to be noisy would only hide that noise, not fix it.
+for name, wr in [("PPO vs SFT", sft_vs_ppo), ("DPO vs SFT", sft_vs_dpo), ("PPO vs DPO", ppo_vs_dpo)]:
+    total = sum(wr)
+    assert abs(total - 1.0) < 1e-6, f"{name} win/tie rates do not sum to 1.0: {wr}"
+print(f"PPO win-rate over SFT: {sft_vs_ppo[0]:.1%} vs SFT win-rate {sft_vs_ppo[1]:.1%} (tie {sft_vs_ppo[2]:.1%})")
+print(f"DPO win-rate over SFT: {sft_vs_dpo[0]:.1%} vs SFT win-rate {sft_vs_dpo[1]:.1%} (tie {sft_vs_dpo[2]:.1%})")
+print(f"PPO win-rate over DPO: {ppo_vs_dpo[0]:.1%} vs DPO win-rate {ppo_vs_dpo[1]:.1%} (tie {ppo_vs_dpo[2]:.1%})")
+print("TEST 2 PASSED — all three judge comparisons ran and produced valid win/tie rates. "
+      "Read these alongside Notebook 4's oracle sentiment comparison (SFT +0.950, PPO "
+      "+0.845, DPO +1.000) rather than in isolation — see Question 2.")
+"""))
+
+cells.append(code("""
+labels = ["PPO vs SFT", "DPO vs SFT", "PPO vs DPO"]
+wins_first = [sft_vs_ppo[0], sft_vs_dpo[0], ppo_vs_dpo[0]]
+wins_second = [sft_vs_ppo[1], sft_vs_dpo[1], ppo_vs_dpo[1]]
+ties = [sft_vs_ppo[2], sft_vs_dpo[2], ppo_vs_dpo[2]]
+
+fig, ax = plt.subplots(figsize=(8, 4))
+x = range(len(labels))
+ax.bar(x, wins_first, label="first model wins")
+ax.bar(x, wins_second, bottom=wins_first, label="second model wins")
+ax.bar(x, ties, bottom=[a+b for a, b in zip(wins_first, wins_second)], label="tie / position-bias")
+ax.set_xticks(list(x)); ax.set_xticklabels(labels)
+ax.set_ylabel("fraction of held-out prompts")
+ax.set_title("Pairwise win-rates (judge, both orderings)")
+ax.legend()
+plt.tight_layout(); plt.show()
+"""))
+
+cells.append(md("""
+### Question 2
+
+`held_out_topics` are drawn from the same 40-word `TOPIC_KEYWORDS` vocabulary every stage
+has used, just the last 10 words in that fixed list — not topics the models have never seen
+mentioned during training in any form. Is this a genuinely held-out evaluation, or could it
+be overstating how well these models would generalize to a truly novel topic? What would a
+stricter held-out set look like for this pipeline?
+
+Separately: if PPO's win-rate above did *not* exceed SFT's, is that surprising given
+Notebook 3's reward model score rose throughout PPO training (its own TEST 7 passed), and
+given Notebook 4 already showed PPO's completions can be repetitive/lower-coherence than
+SFT's? What does it tell you that an independent judge and a completely separate oracle
+sentiment scorer can agree a *learned reward model's own training curve* going up doesn't
+guarantee the resulting policy is actually better?
+
+*Write your answer below:*
+
+"""))
+
+# Part 3 is appended here.
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
