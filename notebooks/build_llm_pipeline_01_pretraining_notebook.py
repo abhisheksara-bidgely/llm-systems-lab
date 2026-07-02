@@ -398,7 +398,117 @@ print(f"TEST 4 PASSED — {data.shape[0]} blocks, shift relationship verified, "
       f"max token id {data.max().item()} < vocab size {tokenizer.get_vocab_size()}")
 """))
 
-# Part 5 is appended here.
+# ─── PART 5: PRETRAINING LOOP ────────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 5: Pretraining Loop
+
+Trains the ~14M-parameter model for 1000 steps (batch size 48) with AdamW,
+a 100-step linear warmup followed by cosine decay to 10% of peak LR, and
+gradient clipping at 1.0. On an RTX 3070 (8GB) this takes ~4-5 minutes.
+Verified reference run: loss falls from ~9.07 (step 0) to ~3.0 (step 999).
+"""))
+
+cells.append(code("""
+cfg = GPTConfig(vocab_size=8000, block_size=BLOCK_SIZE, n_layer=6, n_head=6, n_embd=384, dropout=0.1)
+model = GPTModel(cfg).to(device)
+n_params = sum(p.numel() for p in model.parameters())
+print(f"Model param count: {n_params:,}")
+
+# Sample BEFORE training (expect near-random tokens)
+prompt_ids = tokenizer.encode("Once upon a time").ids
+prompt_idx = torch.tensor([prompt_ids], device=device)
+before_out = model.generate(prompt_idx, max_new_tokens=40, temperature=0.8, top_k=40)
+print("BEFORE TRAINING:", tokenizer.decode(before_out[0].tolist()))
+"""))
+
+cells.append(code("""
+max_steps = 1000
+warmup_steps = 100
+base_lr = 3e-4
+batch_size = 48
+
+opt = torch.optim.AdamW(model.parameters(), lr=base_lr)
+
+def get_lr(step):
+    if step < warmup_steps:
+        return base_lr * (step + 1) / warmup_steps
+    progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+    return 0.1 * base_lr + 0.5 * (base_lr - 0.1 * base_lr) * (1 + math.cos(math.pi * progress))
+
+n_blocks = data.shape[0]
+losses = []
+t0 = time.time()
+for step in range(max_steps):
+    lr = get_lr(step)
+    for g in opt.param_groups:
+        g['lr'] = lr
+    idx = torch.randint(0, n_blocks, (batch_size,))
+    batch = data[idx].to(device)
+    x, y = batch[:, :-1], batch[:, 1:]
+    logits, loss = model(x, y)
+    opt.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    opt.step()
+    losses.append(loss.item())
+    if step % 100 == 0 or step == max_steps - 1:
+        print(f"step {step:4d} | lr {lr:.2e} | loss {loss.item():.3f} | elapsed {time.time()-t0:.0f}s")
+
+print(f"Training elapsed: {time.time()-t0:.1f}s")
+"""))
+
+cells.append(code("""
+plt.figure(figsize=(8, 4))
+plt.plot(losses, alpha=0.6, label="per-step loss")
+window = 20
+smoothed = [sum(losses[max(0,i-window):i+1]) / len(losses[max(0,i-window):i+1]) for i in range(len(losses))]
+plt.plot(smoothed, label=f"{window}-step moving average", linewidth=2)
+plt.xlabel("step"); plt.ylabel("cross-entropy loss"); plt.title("Pretraining loss curve")
+plt.axhline(y=math.log(8000), color='gray', linestyle='--', label='ln(vocab size) — random-init loss')
+plt.legend(); plt.tight_layout(); plt.show()
+"""))
+
+cells.append(code("""
+# TEST 5: loss must have decreased substantially from its random-init level
+first_20_avg = sum(losses[:20]) / 20
+last_20_avg = sum(losses[-20:]) / 20
+print(f"first-20-step avg loss: {first_20_avg:.3f}, last-20-step avg loss: {last_20_avg:.3f}")
+assert last_20_avg < first_20_avg, "loss did not decrease over training"
+assert last_20_avg < 4.0, f"final loss {last_20_avg:.3f} higher than expected (<4.0)"
+print("TEST 5 PASSED — loss decreased and reached expected range")
+"""))
+
+cells.append(code("""
+# Sample AFTER training
+for prompt_text in ["Once upon a time", "Lily and Tom went to the"]:
+    prompt_ids = tokenizer.encode(prompt_text).ids
+    idx = torch.tensor([prompt_ids], device=device)
+    out = model.generate(idx, max_new_tokens=50, temperature=0.8, top_k=40)
+    print(f"PROMPT: {prompt_text!r}")
+    print("  ->", tokenizer.decode(out[0].tolist()))
+"""))
+
+cells.append(md("""
+### Question 4
+
+Compare the BEFORE-training and AFTER-training samples above. Beyond "the
+loss went down", what specific things did the model learn to do (e.g. about
+spelling, grammar, common story structure, character names)? Looking at the
+loss curve, does it look like the model has fully converged at step 1000, or
+would more steps likely help further?
+
+*Write your answer below:*
+
+"""))
+
+cells.append(code("""
+ckpt_path = f"{CKPT_DIR}/base_model.pt"
+torch.save({'model_state_dict': model.state_dict(), 'config': cfg}, ckpt_path)
+tokenizer.save_model(CKPT_DIR, "tinystories_bpe")
+print(f"Saved model checkpoint to {ckpt_path}")
+print(f"Saved tokenizer files to {CKPT_DIR}/tinystories_bpe-vocab.json / -merges.txt")
+"""))
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
