@@ -92,13 +92,22 @@ training rather than used to shape it.</p>
 
 <div class="definition">
 <strong>Position bias.</strong> LLM judges are empirically biased toward whichever
-completion is shown <em>first</em> in the prompt, independent of actual quality (Zheng et
+completion is shown in a particular position, independent of actual quality (Zheng et
 al. 2023, "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena", document this
 directly). The standard mitigation — used here — is to present every pair to the judge
-<strong>twice</strong>, once in each order, and only count a confident win if the judge
-picks the <em>same</em> completion regardless of position. If the judge flips its answer
-depending on order, that comparison contributes no reliable preference signal and is
-treated as a tie/discard rather than counted toward either model's win-rate.</div>
+<strong>twice</strong>, once in each order, and combine the two results. The simplest
+version of this (only count a win if the judge's generated answer is identical across both
+orderings, otherwise discard as a tie) breaks down if the bias is strong: this pipeline's
+actual judge model turns out to prefer whichever completion is shown second with high
+confidence regardless of content, so exact-agreement would discard nearly every comparison
+as a tie, leaving no usable signal. The fix used here instead reads the judge's raw
+log-probability preference for "A" over "B" in each ordering and <em>subtracts</em> the two
+orderings' margins — if position bias is a roughly content-independent additive offset in
+log-odds space, it cancels exactly in the subtraction (each ordering's margin is
+<code>true_preference &plusmn; bias</code>, with the sign of the true-preference term
+flipping between orderings while the bias term does not), leaving twice the actual
+content-driven preference. This is a graded correction, not merely a detect-and-discard
+one.</div>
 
 <h3>Verbosity Bias</h3>
 
@@ -134,8 +143,10 @@ keeps climbing while qualitative generations degrade would show.</div>
   <li>Pairwise LLM-as-judge comparison reuses Bradley-Terry's relative-judgment structure,
   but with an independent judge model, applied only after training (not used to shape a
   reward signal).</li>
-  <li>Position bias is controlled by presenting every pair in both orderings and discarding
-  comparisons where the judge's answer flips.</li>
+  <li>Position bias is controlled by presenting every pair in both orderings and combining
+  the two log-probability preference margins by subtraction, which cancels an additive
+  positional offset — more robust than discarding comparisons outright when the bias is
+  strong.</li>
   <li>Verbosity bias means win-rate differences should be read alongside completion length,
   not treated as a pure quality signal in isolation.</li>
   <li>A reward-vs-KL curve visualizes the same overoptimization risk as Goodhart's law —
@@ -411,7 +422,25 @@ git commit -m "feat: bootstrap llm_training_pipeline notebook 5 (intro + setup)"
 
 **Interfaces:**
 - Consumes: `device` from Task 3.
-- Produces (notebook runtime namespace): `judge_tokenizer`, `judge_model`, `judge_pair(prompt, completion_a, completion_b) -> 'A' | 'B' | None`, `judge_pair_both_orders(prompt, completion_1, completion_2) -> 1 | -1 | 0`.
+- Produces (notebook runtime namespace): `judge_tokenizer`, `judge_model`, `judge_logit_margin(prompt, completion_a, completion_b) -> float`, `judge_pair_both_orders(prompt, completion_1, completion_2) -> 1 | -1 | 0`.
+
+**Note on scoring method (revised from an initial greedy-generation design):** a first
+implementation attempt asked the judge to generate the letter "A"/"B" and required both
+orderings to agree before declaring a winner. On this environment's actual
+`Qwen2.5-1.5B-Instruct` weights, that failed: the model shows a very strong position bias
+(P(whichever completion is placed second) ≈ 0.8–0.99, confirmed across multiple content
+pairs including both orderings of the same pair) — strong enough that the two orderings
+essentially never agree, so every comparison returns a tie and the entire win-rate
+evaluation (Task 5) would carry zero usable signal. The fix below scores each ordering by
+the **log-probability margin** between the "A" and "B" tokens directly from the model's
+logits (no generation needed), then combines the two orderings by subtraction:
+`combined = margin(order 1) − margin(order 2)`. If position bias is a roughly constant
+additive offset in log-odds space — the standard assumption behind this technique — it
+cancels exactly in the subtraction (each ordering's margin is `true_preference ± bias`,
+with the sign of `true_preference` flipping between orderings while the bias term does
+not), leaving `combined = 2 × true_preference`. This is graded, cancels the bias
+mathematically instead of only detecting-and-discarding it, and needs only two forward
+passes per comparison (no autoregressive generation).
 
 - [ ] **Step 1: Append the Part 1 cells**
 
@@ -422,8 +451,11 @@ cells.append(md("""
 ## Part 1: LLM-as-Judge Pairwise Comparison
 
 `judge_pair_both_orders` presents the same pair to the judge twice (swapped positions) and
-only counts a confident win if the judge agrees across both orderings — see
-`docs/llm_training_pipeline_reference.html#s8` for why position bias makes this necessary.
+combines a log-probability preference margin from each ordering — see
+`docs/llm_training_pipeline_reference.html#s8` for why position bias makes evaluating both
+orderings necessary, and why a margin-based combination is used instead of requiring exact
+token-level agreement (this pipeline's actual judge model shows position bias strong
+enough that exact-agreement would produce zero usable signal).
 """))
 
 cells.append(code("""
@@ -450,38 +482,46 @@ Completion B: {completion_b}
 
 Better completion:\"\"\"
 
+def _token_id_variants(letter):
+    \"\"\"Candidate token ids for a bare letter as it might be tokenized at the
+    start of a generated response, with or without a leading space.\"\"\"
+    ids = set()
+    for s in (letter, ' ' + letter):
+        enc = judge_tokenizer.encode(s, add_special_tokens=False)
+        if len(enc) >= 1:
+            ids.add(enc[0])
+    return sorted(ids)
+
+_A_TOKEN_IDS = _token_id_variants('A')
+_B_TOKEN_IDS = _token_id_variants('B')
+
 @torch.no_grad()
-def judge_pair(prompt, completion_a, completion_b):
-    \"\"\"Returns 'A', 'B', or None if the judge's response couldn't be parsed.\"\"\"
+def judge_logit_margin(prompt, completion_a, completion_b):
+    \"\"\"Returns log P(A) - log P(B) at the answer position for one ordering
+    (positive means completion_a, placed as 'A', is preferred).\"\"\"
     text = JUDGE_PROMPT_TEMPLATE.format(prompt=prompt, completion_a=completion_a, completion_b=completion_b)
     messages = [{"role": "user", "content": text}]
     inputs = judge_tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
     ).to(device)
-    out = judge_model.generate(
-        **inputs, max_new_tokens=3, do_sample=False, pad_token_id=judge_tokenizer.eos_token_id
-    )
-    response = judge_tokenizer.decode(
-        out[0, inputs['input_ids'].shape[1]:], skip_special_tokens=True
-    ).strip().upper()
-    if response.startswith('A'):
-        return 'A'
-    if response.startswith('B'):
-        return 'B'
-    return None
+    out = judge_model(**inputs)
+    logits = out.logits[0, -1, :].float()
+    log_probs = torch.log_softmax(logits, dim=-1)
+    log_p_a = torch.logsumexp(log_probs[_A_TOKEN_IDS], dim=0)
+    log_p_b = torch.logsumexp(log_probs[_B_TOKEN_IDS], dim=0)
+    return (log_p_a - log_p_b).item()
 
 
-def judge_pair_both_orders(prompt, completion_1, completion_2):
-    \"\"\"Returns 1 if completion_1 wins both orderings, -1 if completion_2 wins both,
-    0 if the judge disagrees across orderings (position bias) or a response was
-    unparseable in either ordering.\"\"\"
-    r1 = judge_pair(prompt, completion_1, completion_2)   # completion_1='A', completion_2='B'
-    r2 = judge_pair(prompt, completion_2, completion_1)   # completion_2='A', completion_1='B' (swapped)
-    winner_1 = {'A': 1, 'B': 2}.get(r1)
-    winner_2 = {'A': 2, 'B': 1}.get(r2)
-    if winner_1 == 1 and winner_2 == 1:
+def judge_pair_both_orders(prompt, completion_1, completion_2, margin_threshold=0.1):
+    \"\"\"Returns 1 if completion_1 is preferred, -1 if completion_2 is preferred, 0
+    if the combined margin (after cancelling additive position bias across both
+    orderings) falls inside the indifference threshold.\"\"\"
+    margin_1 = judge_logit_margin(prompt, completion_1, completion_2)   # + favors completion_1 (as 'A')
+    margin_2 = judge_logit_margin(prompt, completion_2, completion_1)   # + favors completion_2 (as 'A')
+    combined = margin_1 - margin_2
+    if combined > margin_threshold:
         return 1
-    if winner_1 == 2 and winner_2 == 2:
+    if combined < -margin_threshold:
         return -1
     return 0
 """))
@@ -498,11 +538,12 @@ print(f"TEST 1 PASSED — judge correctly and consistently prefers an obviously 
 cells.append(md("""
 ### Question 1
 
-`judge_pair_both_orders` returns `0` both when the judge genuinely disagrees across
-orderings (position bias) and when a response is unparseable in either ordering. Is
-collapsing these two distinct failure modes into the same return value a problem for
-interpreting the resulting win-rates in Part 2? What additional information would you log
-to tell them apart?
+`judge_pair_both_orders` combines the two orderings by subtracting their raw preference
+margins (`combined = margin_1 - margin_2`), which exactly cancels an additive position bias
+only if that bias is roughly constant regardless of the completions' actual content. Is
+that a safe assumption in general? What would you expect to happen to the win-rates in
+Part 2 if the judge's position bias were instead *content-dependent* (e.g. stronger when
+one completion is much longer than the other)?
 
 *Write your answer below:*
 
