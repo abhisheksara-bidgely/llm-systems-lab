@@ -138,7 +138,94 @@ instruction? What would you check to find out?
 
 """))
 
-# Parts 2-3 are appended here.
+# ─── PART 2: PROMPT-LOSS-MASKING ─────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 2: Prompt-Loss-Masking
+
+`GPTModel.forward` already treats label value `-100` as "ignore this position"
+(PyTorch's `F.cross_entropy` default `ignore_index`) — no model code changes
+are needed. We only need a tokenizer function that builds the
+`(input_ids, labels)` pair with prompt-token predictions masked out. This
+follows the same shift-by-one convention as pretraining's `pack_into_blocks`:
+`input_ids[i]` predicts `labels[i]`, where `labels[i]` is the *next* token
+after `input_ids[i]` — so masking is applied to which *target* falls inside
+the prompt, not which *input* position does.
+See `docs/llm_training_pipeline_reference.html#s4` for why we mask at all.
+"""))
+
+cells.append(code("""
+def tokenize_sft_example(topic, story, tokenizer, eot_id, block_size):
+    prompt_ids = tokenizer.encode(format_sft_prompt(topic)).ids
+    completion_ids = tokenizer.encode(story).ids + [eot_id]
+    full_ids = (prompt_ids + completion_ids)[: block_size + 1]
+    n_prompt = min(len(prompt_ids), len(full_ids))
+    n_real = len(full_ids)
+
+    pad_len = (block_size + 1) - n_real
+    full_ids = full_ids + [eot_id] * pad_len
+
+    input_ids = full_ids[:-1]           # length block_size
+    targets_raw = full_ids[1:]          # length block_size, shifted by one
+
+    labels = []
+    for i in range(block_size):
+        target_pos = i + 1              # position in the original (unshifted) sequence
+        if target_pos < n_prompt or target_pos >= n_real:
+            labels.append(-100)         # target is a prompt token, or padding
+        else:
+            labels.append(targets_raw[i])
+
+    return (
+        torch.tensor(input_ids, dtype=torch.long),
+        torch.tensor(labels, dtype=torch.long),
+    )
+
+BLOCK_SIZE = 256
+"""))
+
+cells.append(code("""
+# TEST 2: known mask boundary + masked-loss != full-loss
+topic, story = "dog", "A dog ran fast."
+prompt_len = len(tokenizer.encode(format_sft_prompt(topic)).ids)
+input_ids, labels = tokenize_sft_example(topic, story, tokenizer, EOT_ID, BLOCK_SIZE)
+
+assert input_ids.shape == (BLOCK_SIZE,)
+assert labels.shape == (BLOCK_SIZE,)
+# every target position before (prompt_len - 1) must be masked (predicting a prompt token)
+assert torch.all(labels[: prompt_len - 1] == -100), "prompt-region targets not fully masked"
+# the position right after the prompt should predict the first response token (not masked)
+assert labels[prompt_len - 1].item() != -100, "first response token incorrectly masked"
+print(f"TEST 2a PASSED — mask boundary correct (prompt_len={prompt_len})")
+
+masked_logits, masked_loss = base_model(input_ids.unsqueeze(0).to(device), labels.unsqueeze(0).to(device))
+unmasked_targets = torch.tensor(
+    (tokenizer.encode(format_sft_prompt(topic)).ids + tokenizer.encode(story).ids + [EOT_ID])[1: BLOCK_SIZE + 1]
+    + [EOT_ID] * max(0, BLOCK_SIZE - (len(tokenizer.encode(format_sft_prompt(topic)).ids + tokenizer.encode(story).ids + [EOT_ID]) - 1)),
+    dtype=torch.long,
+)[:BLOCK_SIZE].unsqueeze(0).to(device)
+_, full_loss = base_model(input_ids.unsqueeze(0).to(device), unmasked_targets)
+
+print(f"masked_loss={masked_loss.item():.4f}, full_loss(unmasked prompt+response)={full_loss.item():.4f}")
+assert abs(masked_loss.item() - full_loss.item()) > 1e-4, "masked and unmasked loss should differ"
+print("TEST 2b PASSED — masked loss differs from full (unmasked) loss")
+"""))
+
+cells.append(md("""
+### Question 2
+
+The masking rule above checks `target_pos < n_prompt`, i.e. it masks based on
+where the **predicted** token falls, not where the **input** token falls.
+Concretely: the input token at the last prompt position (`input_ids[n_prompt - 1]`,
+the `\\n` after the prompt) is *not* masked as an input — it's fed into the
+model normally. Why does that make sense, given the model needs to see the
+whole prompt to generate the response?
+
+*Write your answer below:*
+
+"""))
+
+# Part 3 is appended here.
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
