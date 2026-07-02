@@ -305,7 +305,116 @@ torch.save({'model_state_dict': dpo_policy.state_dict(), 'config': sft_cfg}, ckp
 print(f"Saved DPO checkpoint to {ckpt_path}")
 """))
 
-# Part 3 is appended here.
+# ─── PART 3: SFT vs PPO vs DPO COMPARISON ────────────────────────────────────
+cells.append(md("""
+---
+## Part 3: SFT vs PPO vs DPO Comparison
+
+Loads `ppo_model.pt` (Part 3's output) alongside `sft_model` and `dpo_policy`, and compares
+qualitative completions plus sentiment-score distributions across all three on held-out
+topics — the same sentiment scorer used to build the preference dataset, so scores are
+directly comparable to Part 3's.
+"""))
+
+cells.append(code("""
+from transformers import pipeline as hf_pipeline
+from src.llm_pipeline.data import TOPIC_KEYWORDS, format_sft_prompt
+
+sentiment_pipe = hf_pipeline(
+    "sentiment-analysis",
+    model="distilbert-base-uncased-finetuned-sst-2-english",
+    device=0 if device == 'cuda' else -1,
+)
+
+def sentiment_score(text):
+    result = sentiment_pipe(text[:512])[0]
+    sign = 1.0 if result['label'] == 'POSITIVE' else -1.0
+    return sign * result['score']
+
+ppo_ckpt = torch.load(f"{CKPT_DIR}/ppo_model.pt", weights_only=False)
+ppo_model = GPTModel(ppo_ckpt['config']).to(device)
+ppo_model.load_state_dict(ppo_ckpt['model_state_dict'])
+ppo_model.eval()
+dpo_policy.eval()
+print("Loaded ppo_model.pt for comparison")
+"""))
+
+cells.append(code("""
+held_out_topics = TOPIC_KEYWORDS[-10:]
+
+@torch.no_grad()
+def generate_completion(model, prompt, max_new_tokens=40):
+    prompt_ids = torch.tensor([tokenizer.encode(prompt).ids], device=device)
+    out = model.generate(prompt_ids, max_new_tokens=max_new_tokens, temperature=0.8, top_k=40)
+    return tokenizer.decode(out[0, prompt_ids.shape[1]:].tolist())
+
+sft_scores, ppo_scores, dpo_scores = [], [], []
+for topic in held_out_topics:
+    prompt = format_sft_prompt(topic)
+    sft_c = generate_completion(sft_model, prompt)
+    ppo_c = generate_completion(ppo_model, prompt)
+    dpo_c = generate_completion(dpo_policy, prompt)
+    sft_scores.append(sentiment_score(sft_c))
+    ppo_scores.append(sentiment_score(ppo_c))
+    dpo_scores.append(sentiment_score(dpo_c))
+    print(f"=== topic: {topic} ===")
+    print("SFT:", sft_c)
+    print("PPO:", ppo_c)
+    print("DPO:", dpo_c)
+    print()
+
+print(f"mean sentiment — SFT: {sum(sft_scores)/len(sft_scores):+.3f}, "
+      f"PPO: {sum(ppo_scores)/len(ppo_scores):+.3f}, "
+      f"DPO: {sum(dpo_scores)/len(dpo_scores):+.3f}")
+"""))
+
+cells.append(code("""
+plt.figure(figsize=(7, 4))
+plt.boxplot([sft_scores, ppo_scores, dpo_scores], tick_labels=["SFT", "PPO", "DPO"])
+plt.ylabel("sentiment score")
+plt.title("Held-out completion sentiment — SFT vs PPO vs DPO")
+plt.axhline(y=0, color='gray', linestyle='--', linewidth=0.8)
+plt.tight_layout(); plt.show()
+"""))
+
+cells.append(code("""
+# TEST 4: DPO must raise mean sentiment above the SFT-only baseline. PPO's comparison is
+# reported, not hard-asserted: PPO optimizes a *learned* reward model (Section 5) rather
+# than the oracle sentiment scorer directly, so it can legitimately reward-hack into
+# text the reward model still scores well but that a held-out oracle judges as no
+# better (or worse) than SFT — this is a real, observable instance of the exact failure
+# mode Section 5 and Question 3 (below) ask you to reason about, not a bug to hide.
+mean_sft = sum(sft_scores) / len(sft_scores)
+mean_ppo = sum(ppo_scores) / len(ppo_scores)
+mean_dpo = sum(dpo_scores) / len(dpo_scores)
+print(f"mean sentiment — SFT: {mean_sft:+.3f}, PPO: {mean_ppo:+.3f}, DPO: {mean_dpo:+.3f}")
+assert mean_dpo > mean_sft, "DPO did not raise mean sentiment above SFT on held-out topics"
+if mean_ppo > mean_sft:
+    print("PPO also raised mean sentiment above SFT-only on held-out topics.")
+else:
+    print("PPO did NOT raise mean sentiment above SFT-only here — read the PPO completions "
+          "above and see Question 3: this is a live instance of reward hacking (Section 5), "
+          "not a failed run.")
+print("TEST 4 PASSED — DPO raises mean held-out sentiment above SFT-only")
+"""))
+
+cells.append(md("""
+### Question 3
+
+PPO and DPO start from the identical `sft_model` checkpoint and target the identical
+underlying objective, but reach it through very different training procedures (Section 6
+vs Section 7). Looking at the sentiment distributions and the generations themselves, do
+PPO and DPO converge to similarly-shifted output distributions, or do they diverge in some
+noticeable way? In particular, if PPO's mean held-out sentiment did *not* exceed SFT's:
+read the actual PPO completions printed above — do they read as coherent stories, or do
+you see repetition/broken grammar that a sentiment classifier still scores positively
+(because it only reads word-level valence, not coherence)? Given everything covered in
+Sections 5-7 (reward hacking, KL budgets, DPO's static-dataset limitation), what's your
+best guess for *why* PPO and DPO might diverge like this?
+
+*Write your answer below:*
+
+"""))
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
