@@ -688,7 +688,10 @@ log-odds space, it cancels exactly in the subtraction (each ordering's margin is
 <code>true_preference &plusmn; bias</code>, with the sign of the true-preference term
 flipping between orderings while the bias term does not), leaving twice the actual
 content-driven preference. This is a graded correction, not merely a detect-and-discard
-one.</div>
+one — though even this does not fully save the day here: this pipeline's own judge model
+turns out to have a position bias that is not a clean content-independent constant either,
+so the notebook treats its win-rates as exploratory evidence rather than a hard pass/fail
+signal (see Notebook 5's Question 1 and Part 2).</div>
 
 <h3>Verbosity Bias</h3>
 
