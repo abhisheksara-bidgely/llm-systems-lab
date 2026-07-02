@@ -185,5 +185,61 @@ model quality than architectural changes.
 
 ---
 
-*(Sections for SFT, reward modeling, PPO, DPO, evaluation, and RLVR/GRPO are
+## 9. Why mask the prompt tokens in the SFT loss — what breaks if you don't?
+
+Concretely: if a `(prompt, response)` pair has roughly as many prompt tokens
+as response tokens (common for short instructions + short responses), an
+*unmasked* loss spends roughly half its gradient mass teaching the model to
+reproduce a fixed, deterministic template string. That template is drawn from
+a tiny, structured space (here, `"Write a short story about {topic}:\n"` for
+~40 topic words) — a model can drive its loss on those positions to near
+zero almost immediately, after which further gradient on them is close to
+noise, but it is noise computed and backpropagated through the *same* shared
+weights used for the response tokens, diluting the signal that actually
+teaches "produce a good response to this prompt."
+
+There's a second, sharper problem: at inference time the prompt is **given**,
+never generated — the user supplies it. Training the model to also predict
+it optimizes a capability (predicting the next prompt token) that the
+deployed system never exercises. Masking the prompt with `ignore_index=-100`
+removes both problems: gradient flows only through the tokens the model must
+actually learn to produce.
+
+---
+
+## 10. Catastrophic forgetting and the low-LR rationale — precedent
+
+**Catastrophic forgetting** (McCloskey & Cohen, 1989, in the connectionist
+networks literature; French, 1999, "Catastrophic Forgetting in Connectionist
+Networks" surveys it) is the tendency of a neural network trained
+sequentially on task B after task A to lose performance on task A, because
+gradient descent on B's narrower data distribution is free to overwrite
+weight directions that were only useful for A. SFT is exactly this setup:
+"task A" is the broad next-token competence pretraining built from a huge,
+diverse corpus; "task B" is a narrow, templated instruction-following
+distribution over a fraction of that data's diversity.
+
+Two standard mitigations, in order of what this pipeline uses:
+
+1. **Low LR + few steps** (used here: `3e-5`, roughly 10-100x below
+   pretraining's `3e-4` peak LR, and a comparatively small step count). This
+   keeps SFT's gradient updates small enough to shift the output
+   *distribution* toward instruction-following without individual steps
+   large enough to erase pretrained weight structure. It is the simplest
+   mitigation and requires no architecture changes — which is why it is the
+   default starting point for any full-parameter fine-tune.
+2. **Parameter-efficient fine-tuning** (LoRA — Hu et al. 2021, "LoRA:
+   Low-Rank Adaptation of Large Language Models" — adapters, etc.): freeze
+   the pretrained weights entirely and train only a small number of new
+   parameters (e.g. low-rank update matrices) inserted alongside them.
+   Because the original weights are literally untouched, catastrophic
+   forgetting of the base capability is structurally impossible, at the cost
+   of a smaller effective capacity for the new task. Not used in this
+   pipeline (a full from-scratch, full-parameter fine-tune is the point of
+   the exercise), but the standard production-scale answer when serving many
+   fine-tunes off one base model cheaply matters.
+
+---
+
+*(Sections for reward modeling, PPO, DPO, evaluation, and RLVR/GRPO are
 appended here as the corresponding notebooks are built.)*
