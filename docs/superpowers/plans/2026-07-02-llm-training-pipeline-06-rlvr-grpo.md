@@ -783,7 +783,7 @@ cells.append(md("""
 ---
 ## Part 3: GRPO Training Loop
 
-For each step: pick one story prefix + target word, sample a group of 6 completions,
+For each step: pick one story prefix + target word, sample a group of 10 completions,
 score each with `verifiable_reward`, compute group-relative advantage, then take a few
 clipped-objective gradient steps (reusing `ppo_clipped_loss`) plus an explicit KL penalty
 term against a frozen reference — unlike PPO, the KL here is added directly to the loss
@@ -945,7 +945,7 @@ print(f"Saved GRPO checkpoint to {ckpt_path}")
 """))
 ```
 
-- [ ] **Step 2: Regenerate and execute (this step takes several minutes — 150 GRPO steps, each generating a group of 6 completions)**
+- [ ] **Step 2: Regenerate and execute (this step takes several minutes — 200 GRPO steps, each generating a group of 10 completions)**
 
 ```bash
 cd notebooks && ../.venv/bin/python build_llm_pipeline_06_rlvr_grpo_notebook.py && cd ..

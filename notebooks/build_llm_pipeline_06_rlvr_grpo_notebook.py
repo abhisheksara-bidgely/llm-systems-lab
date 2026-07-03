@@ -263,7 +263,7 @@ cells.append(md("""
 ---
 ## Part 3: GRPO Training Loop
 
-For each step: pick one story prefix + target word, sample a group of 6 completions,
+For each step: pick one story prefix + target word, sample a group of 10 completions,
 score each with `verifiable_reward`, compute group-relative advantage, then take a few
 clipped-objective gradient steps (reusing `ppo_clipped_loss`) plus an explicit KL penalty
 term against a frozen reference — unlike PPO, the KL here is added directly to the loss
