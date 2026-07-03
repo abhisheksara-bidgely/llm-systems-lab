@@ -50,6 +50,8 @@ re-derived here.</em></p>
   <a href="#s6">6. PPO / RLHF</a>
   <a href="#s7">7. DPO</a>
   <a href="#s8">8. Evaluation</a>
+  <a href="#s9">9. RLVR / GRPO</a>
+  <a href="#s10">10. Beyond This Pipeline</a>
 </nav>
 
 <!-- ============================================================ -->
@@ -738,6 +740,169 @@ keeps climbing while qualitative generations degrade would show.</div>
   <li>A reward-vs-KL curve visualizes the same overoptimization risk as Goodhart's law —
   a proxy reward that keeps climbing while true quality plateaus or degrades is the
   signature of an over-optimized policy.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s9">9. RLVR / GRPO</h2>
+
+<p>PPO (Section 6) needs a learned reward model because, in general, "how good is this
+completion" has no closed-form definition — that's exactly why Section 5 trains one from
+preference data. Some tasks are different: correctness is mechanically checkable. A math
+answer either matches the ground truth or doesn't; code either passes its test suite or
+doesn't; here, a story continuation either mentions a required word within a token budget
+or doesn't. <strong>RLVR</strong> (Reinforcement Learning with Verifiable Rewards) is RL
+against exactly this kind of rule-based, automatically-computed reward — no reward model,
+no human/classifier preference judgments anywhere in the loop.</p>
+
+<h3>Why This Removes the Need for a Reward Model</h3>
+
+<p>Reward modeling (Section 5) exists to convert relative human/proxy preferences into a
+differentiable-adjacent scalar signal precisely because no closed-form reward function was
+available. When the task is mechanically verifiable, that whole apparatus is unnecessary —
+the reward function <em>is</em> the verification rule itself, computed directly from the
+generated text (e.g. this pipeline's <code>verifiable_reward</code>: does the continuation
+contain the target word, and does it stay under the token budget?). This also sidesteps
+reward hacking of a <em>learned</em> reward model's blind spots (Section 5) — there is no
+learned proxy to exploit, only the rule itself, though a policy can still find degenerate
+ways to satisfy an under-specified rule (a risk covered in Q&amp;A 19).</p>
+
+<h3>Group-Relative Advantage: Removing the Value Function</h3>
+
+<p>PPO's value function exists to provide a variance-reducing baseline for the advantage
+estimate (Section 6) — but training a value function is itself nontrivial (it can lag or
+misestimate, especially early in training) and doubles the parameters being optimized.
+GRPO (Shao et al. 2024, "DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open
+Language Models") replaces the learned value baseline with a much simpler one: sample a
+<strong>group</strong> of \(G\) completions for the <em>same</em> prompt, and use the
+group's own reward statistics as the baseline.</p>
+
+\[A_i = \frac{r_i - \mathrm{mean}(\{r_1, \ldots, r_G\})}{\mathrm{std}(\{r_1, \ldots, r_G\}) + \epsilon}, \qquad i = 1, \ldots, G\]
+
+<p>Every completion in the group is scored, the group's mean and standard deviation are
+computed, and each completion's advantage is just its own reward, standardized against its
+group. A completion that outperforms its group's average gets positive advantage
+(reinforced); one that underperforms gets negative advantage (suppressed) — no value
+function is ever instantiated or trained. This is a Monte-Carlo baseline (the group mean
+approximates "expected reward for this prompt under the current policy") rather than a
+learned one, made viable specifically because rule-based rewards are cheap enough to sample
+many completions per prompt without needing a reward-model forward pass for each.</p>
+
+<h3>Why This Displaced PPO for Reasoning-Model Training</h3>
+
+<p>GRPO (and RLVR more broadly) is the technique behind DeepSeekMath's and DeepSeek-R1's
+reasoning-RL training stage, and is widely credited as a major factor in the emergence of
+extended chain-of-thought reasoning in that model family (DeepSeek-AI, 2025, "DeepSeek-R1:
+Incentivizing Reasoning Capability in LLMs via Reinforcement Learning"). Two properties of
+math/code/reasoning tasks make RLVR + GRPO a particularly good fit where PPO + a learned
+reward model previously dominated: (1) verifiable correctness is exactly the kind of signal
+these domains already have in abundance (existing math datasets with known answers, code
+problems with test suites) at essentially zero marginal cost to compute, unlike human
+preference labels; (2) removing the value function removes a whole class of PPO training
+instability (value miscalibration, the extra hyperparameters coordinating policy vs. value
+learning rates) at exactly the model scale (very large) where that instability is most
+costly to debug. The trade-off is scope: RLVR only applies where a reward is actually
+verifiable — it is not a general replacement for RLHF on open-ended, subjective tasks
+(story quality, helpfulness, tone) where no mechanical check exists, which is exactly why
+Sections 5-7's reward-model/PPO/DPO machinery remains necessary for this pipeline's own
+task.</p>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 9</strong>
+<ul>
+  <li>RLVR replaces a learned reward model with a mechanically-computed, rule-based
+  verification of correctness — applicable only where such a rule exists.</li>
+  <li>GRPO replaces PPO's learned value-function baseline with a group-relative one:
+  sample \(G\) completions per prompt, standardize each completion's reward against its
+  own group's mean and standard deviation.</li>
+  <li>No value function is trained in GRPO — this removes an entire axis of PPO
+  instability at the cost of needing multiple completions per prompt per step.</li>
+  <li>RLVR + GRPO is credited as a key ingredient in DeepSeekMath/DeepSeek-R1-style
+  reasoning-RL training, specifically because math/code domains have abundant verifiable
+  reward signal essentially for free.</li>
+</ul>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s10">10. Beyond This Pipeline</h2>
+
+<p>This pipeline covers pretraining, SFT, reward modeling, PPO, DPO, evaluation, and
+RLVR/GRPO in full hands-on depth. The alignment-technique landscape is broader; the
+following are concept-only (no notebook implements them) but worth knowing where they sit
+relative to what's been built.</p>
+
+<table>
+<tr><th>Technique</th><th>Core Idea</th><th>Relation to This Pipeline</th></tr>
+<tr>
+  <td>RLAIF</td>
+  <td>Replace human preference labels with an AI judge's labels when constructing the
+  preference dataset (Bai et al. 2022, "Constitutional AI"; Lee et al. 2023, "RLAIF").</td>
+  <td>This pipeline already uses an automated proxy (a sentiment classifier) instead of
+  human labels for reward-model training — RLAIF generalizes that idea to any
+  capable-model-as-labeler setup, and Notebook 5's LLM-as-judge evaluation uses the same
+  underlying idea for measurement rather than training.</td>
+</tr>
+<tr>
+  <td>ORPO</td>
+  <td>Odds Ratio Preference Optimization (Hong et al. 2024) folds SFT and preference
+  optimization into a single training stage — one combined loss (SFT cross-entropy plus an
+  odds-ratio preference term), no separate reference model needed.</td>
+  <td>Contrasts with this pipeline's explicit SFT-then-DPO two-stage sequence (Sections 4
+  and 7); ORPO's appeal is removing a whole training stage and a frozen reference-model
+  copy at the cost of a less-studied combined objective.</td>
+</tr>
+<tr>
+  <td>KTO</td>
+  <td>Kahneman-Tversky Optimization (Ethayarajh et al. 2024) trains on <em>unpaired</em>
+  binary desirable/undesirable labels rather than `(chosen, rejected)` pairs for the same
+  prompt, motivated by prospect theory's human loss-aversion asymmetry.</td>
+  <td>Relevant when preference data can only be collected as independent thumbs-up/down
+  signals (e.g. production usage logs) rather than this pipeline's constructed pairwise
+  comparisons (Section 5) — a different data-collection assumption, not a different
+  underlying objective family.</td>
+</tr>
+<tr>
+  <td>Best-of-N / Rejection Sampling</td>
+  <td>At inference (or as a training-data-generation step), sample \(N\) completions and
+  keep only the one a reward model scores highest — no policy gradient update at all.</td>
+  <td>This pipeline's own preference-pair construction (Section 5: sample a group, keep the
+  best/worst) <em>is</em> a form of best-of-N/worst-of-N sampling, just used to build
+  training data rather than as the final inference-time strategy.</td>
+</tr>
+<tr>
+  <td>Constitutional AI</td>
+  <td>Bai et al. 2022: a model critiques and revises its own outputs against a written set
+  of principles ("the constitution"), and the revised outputs become training data — an
+  early influential RLAIF-adjacent technique, combined with RL against an AI-labeled
+  preference model.</td>
+  <td>A specific, well-known instance of the RLAIF idea above, with an added self-critique
+  step this pipeline's simpler sentiment-classifier proxy doesn't use.</td>
+</tr>
+<tr>
+  <td>Model Merging</td>
+  <td>Combine multiple fine-tuned checkpoints (e.g. by weight averaging, or more
+  sophisticated methods like TIES/DARE merging) into a single model without any additional
+  gradient-based training.</td>
+  <td>An orthogonal, post-hoc technique — could in principle be applied to this pipeline's
+  own `sft_model.pt`/`ppo_model.pt`/`dpo_model.pt` checkpoints (all share the identical
+  architecture and started from the same weights) to explore whether their merge behaves
+  like an interpolation between PPO's and DPO's behavioral shifts, but no notebook here
+  does this.</td>
+</tr>
+</table>
+
+<div class="keyfacts">
+<strong>Key Facts — Section 10</strong>
+<ul>
+  <li>RLAIF and Constitutional AI generalize this pipeline's own use of an automated proxy
+  (sentiment classifier, LLM judge) in place of human labels.</li>
+  <li>ORPO and KTO relax structural assumptions this pipeline's DPO stage makes (a separate
+  SFT stage; paired chosen/rejected data) — worth knowing as alternatives, not necessarily
+  improvements.</li>
+  <li>Best-of-N sampling is already implicitly used here, in preference-data construction
+  rather than as a final inference strategy.</li>
+  <li>Model merging is a distinct, gradient-free way to combine this pipeline's own
+  checkpoints, not explored in any notebook here.</li>
 </ul>
 </div>
 
