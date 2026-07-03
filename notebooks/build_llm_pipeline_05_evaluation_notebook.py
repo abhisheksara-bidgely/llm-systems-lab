@@ -331,7 +331,69 @@ win-rate or Notebook 4's sentiment comparison — would you trust more here, and
 
 """))
 
-# Part 3 is appended here.
+# ─── PART 3: REWARD-VS-KL CURVE ──────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 3: Reward-vs-KL Overoptimization Curve
+
+Loads Part 3's per-step `mean_rewards` / `mean_kls` log and plots both the individual
+curves over training and reward directly against KL. See
+`docs/llm_training_pipeline_reference.html#s8` and Q&A 17 for how to read this plot, and
+its specific limitation here (the plotted reward and the PPO training signal are the same
+reward model, not an independent "gold" judge).
+"""))
+
+cells.append(code("""
+with open(f"{CKPT_DIR}/ppo_training_log.json") as f:
+    ppo_log = json.load(f)
+mean_rewards = ppo_log['mean_rewards']
+mean_kls = ppo_log['mean_kls']
+print(f"Loaded PPO training log — {len(mean_rewards)} steps")
+"""))
+
+cells.append(code("""
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+ax1.plot(mean_rewards)
+ax1.set_xlabel('PPO step'); ax1.set_ylabel('mean reward-model score'); ax1.set_title('Reward over training')
+ax2.plot(mean_kls)
+ax2.set_xlabel('PPO step'); ax2.set_ylabel('mean per-token KL(policy || ref)'); ax2.set_title('KL over training')
+plt.tight_layout(); plt.show()
+"""))
+
+cells.append(code("""
+plt.figure(figsize=(6, 5))
+plt.plot(mean_kls, mean_rewards, alpha=0.5, color='gray', linewidth=1)
+sc = plt.scatter(mean_kls, mean_rewards, c=range(len(mean_kls)), cmap='viridis', s=15)
+plt.colorbar(sc, label='PPO step')
+plt.xlabel('mean KL(policy || ref)'); plt.ylabel('mean reward-model score')
+plt.title('Reward vs. KL — overoptimization curve')
+plt.tight_layout(); plt.show()
+"""))
+
+cells.append(code("""
+# TEST 3: the curve is available and reward is (on net) increasing with KL over this run,
+# consistent with the 'well-regularized' shape described in Q&A 17 for this pipeline's
+# short 150-step / kl_beta=0.1 configuration.
+assert len(mean_rewards) == len(mean_kls) and len(mean_rewards) > 0
+first_half_avg = sum(mean_rewards[: len(mean_rewards)//2]) / (len(mean_rewards)//2)
+second_half_avg = sum(mean_rewards[len(mean_rewards)//2 :]) / (len(mean_rewards) - len(mean_rewards)//2)
+print(f"first-half mean reward: {first_half_avg:.3f}, second-half mean reward: {second_half_avg:.3f}")
+assert second_half_avg > first_half_avg, "reward did not increase (net) across the logged PPO run"
+print("TEST 3 PASSED — reward-vs-KL curve loaded and shows net-increasing reward over the run")
+"""))
+
+cells.append(md("""
+### Question 3
+
+If this exact PPO run were continued for 10x more steps with the same `kl_beta`, sketch
+(in words) what you would expect the reward-vs-KL curve to eventually do, based on Section
+5's reward-hacking discussion and Q&A 14/17. What is the one piece of evidence this
+notebook does *not* have access to that would let you confirm whether that eventually
+happens (versus this pipeline's reward model being unusually hard to hack)?
+
+*Write your answer below:*
+
+"""))
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
