@@ -544,9 +544,10 @@ human label.
 
 ## 19. Reward hacking without a learned reward model — what can still go wrong
 
-Section 9 notes RLVR removes the risk of exploiting a *learned* reward
-model's blind spots, but this doesn't make the reward immune to gaming — it
-only changes what kind of gaming is possible. A rule-based reward is only as
+The HTML reference's Section 9 notes RLVR removes the risk of exploiting a
+*learned* reward model's blind spots, but this doesn't make the reward
+immune to gaming — it only changes what kind of gaming is possible. A
+rule-based reward is only as
 good as the rule's specification, and a sufficiently-optimized policy will
 find any gap between "satisfies the literal rule" and "does the thing the
 rule was meant to check for" (the general pattern is sometimes called
