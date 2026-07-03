@@ -143,10 +143,12 @@ keeps climbing while qualitative generations degrade would show.</div>
   <li>Pairwise LLM-as-judge comparison reuses Bradley-Terry's relative-judgment structure,
   but with an independent judge model, applied only after training (not used to shape a
   reward signal).</li>
-  <li>Position bias is controlled by presenting every pair in both orderings and combining
+  <li>Position bias is mitigated by presenting every pair in both orderings and combining
   the two log-probability preference margins by subtraction, which cancels an additive
   positional offset — more robust than discarding comparisons outright when the bias is
-  strong.</li>
+  strong, though not a complete fix: this pipeline's own judge model shows a bias that
+  isn't fully additive either, so its win-rates are reported as exploratory evidence, not
+  trusted outright.</li>
   <li>Verbosity bias means win-rate differences should be read alongside completion length,
   not treated as a pure quality signal in isolation.</li>
   <li>A reward-vs-KL curve visualizes the same overoptimization risk as Goodhart's law —
@@ -207,9 +209,12 @@ training order).
 right — as KL grows step over step, reward grows with it, and the curve
 doesn't visibly bend back down or plateau sharply within the training run.
 By this *curve-shape* criterion alone, this pipeline's 150-step, `kl_beta=0.1`
-PPO run qualifies: reward rose steadily (mean reward roughly 1.6 → 7.1 over
-the run) and KL stayed bounded (peaking around 1.26, well under the
-notebook's own 2.0 sanity threshold) — no visible turnover or plateau.
+PPO run qualifies: reward rose over the run (starting negative at step 0,
+around -2.0, and reaching roughly +6 by the end, peaking near +8 — per
+Notebook 5's own TEST 3, the first-half step average is 2.643 and the
+second-half average is 5.994) and KL stayed bounded (peaking around 1.26,
+well under the notebook's own 2.0 sanity threshold) — no visible turnover or
+plateau.
 
 **Overoptimized:** the curve would climb for a while and then visibly
 flatten or turn over — later-training points sit *below and to the right* of
@@ -221,8 +226,12 @@ reward model as ground truth (which this pipeline does not have access to —
 using the *same* reward model for both the training signal and the
 diagnostic plot means this pipeline's curve can only show the proxy reward's
 own trajectory, not whether it has decoupled from "true" quality; that
-decoupling would only be visible via the judge comparisons in Part 1 of this
-notebook, or by direct human/qualitative reading of the generations).
+decoupling is only visible via an independent signal — in this pipeline's
+case, Notebook 4's oracle sentiment-score comparison, or direct
+human/qualitative reading of the generations. Notebook 5's LLM-as-judge
+comparison was *intended* to be that independent signal too, but turned out
+itself to be unreliable on this judge model — see Question 1 of Notebook 5's
+Part 1 for why its win-rates are reported rather than trusted outright).
 
 **Practical implication for reading this pipeline's specific plot — and why
 this isn't hypothetical here:** because the same reward model produces both
@@ -237,10 +246,17 @@ lower-coherence (broken grammar, repeated names) despite scoring near-maximal
 on the sentiment classifier — the reward model rewarded surface-level
 positive-word density, not actual story quality, exactly as Q&A 14 warned.
 A "good-looking" reward-vs-KL curve and a genuinely reward-hacked policy are
-not mutually exclusive; the judge-based win-rate comparison in this
-notebook's Part 1 is what actually catches the latter, using a signal
-independent of the training loop, and it's why that comparison doesn't
-hard-require PPO to beat SFT here.
+not mutually exclusive. The signal that actually catches PPO's reward
+hacking here is Notebook 4's independent oracle sentiment comparison (SFT
++0.950 vs. PPO +0.845 on held-out topics — PPO scores *below* SFT despite
+the reward model's own training curve rising throughout). Notebook 5's
+LLM-as-judge win-rate comparison was meant to be a second independent check,
+but on this pipeline's actual run it reported PPO beating SFT 80% of the
+time — the *opposite* conclusion from the oracle sentiment comparison. This
+is itself informative: it's why Notebook 5 does not hard-require any
+particular judge-based win-rate to hold, and why the oracle comparison, not
+the judge, is the one this pipeline actually leans on for the "did PPO
+really improve" question.
 
 ---
 

@@ -727,10 +727,12 @@ keeps climbing while qualitative generations degrade would show.</div>
   <li>Pairwise LLM-as-judge comparison reuses Bradley-Terry's relative-judgment structure,
   but with an independent judge model, applied only after training (not used to shape a
   reward signal).</li>
-  <li>Position bias is controlled by presenting every pair in both orderings and combining
+  <li>Position bias is mitigated by presenting every pair in both orderings and combining
   the two log-probability preference margins by subtraction, which cancels an additive
   positional offset — more robust than discarding comparisons outright when the bias is
-  strong.</li>
+  strong, though not a complete fix: this pipeline's own judge model shows a bias that
+  isn't fully additive either, so its win-rates are reported as exploratory evidence, not
+  trusted outright.</li>
   <li>Verbosity bias means win-rate differences should be read alongside completion length,
   not treated as a pure quality signal in isolation.</li>
   <li>A reward-vs-KL curve visualizes the same overoptimization risk as Goodhart's law —
