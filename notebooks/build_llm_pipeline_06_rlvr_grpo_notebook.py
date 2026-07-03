@@ -155,7 +155,110 @@ if the reward were instead a continuous value (e.g. token count relative to budg
 
 """))
 
-# Parts 2-3 are appended here.
+# ─── PART 2: GRPO CORE ───────────────────────────────────────────────────────
+cells.append(md("""
+---
+## Part 2: GRPO Core
+
+`compute_group_relative_advantage` replaces PPO's GAE + learned value function with a
+normalize-within-group baseline (`docs/llm_training_pipeline_reference.html#s9`).
+`generate_group_rollout` samples a *group* of completions for one prompt (no value head
+anywhere in the policy). `ppo_clipped_loss` is reused unchanged from
+`src/llm_pipeline/rlhf.py` — the clipping mechanism itself doesn't depend on how the
+advantage was computed.
+"""))
+
+cells.append(code("""
+def compute_group_relative_advantage(rewards):
+    \"\"\"rewards: (B, G) — B prompts, G completions per prompt (one group per row).
+    Returns advantages of the same shape: each completion's reward normalized by
+    its own group's mean and std. No value function or baseline network needed.\"\"\"
+    mean = rewards.mean(dim=1, keepdim=True)
+    std = rewards.std(dim=1, keepdim=True)
+    return (rewards - mean) / (std + 1e-4)
+
+
+@torch.no_grad()
+def generate_group_rollout(policy, ref_model, prompt_ids, group_size, max_new_tokens, temperature, top_k, block_size):
+    \"\"\"prompt_ids: (1, prompt_len). Repeats to group_size, samples independently.
+    Returns (idx, policy_logprobs, ref_logprobs), idx of shape
+    (group_size, prompt_len + max_new_tokens), log-probs of shape (group_size, max_new_tokens).\"\"\"
+    idx = prompt_ids.repeat(group_size, 1)
+    policy_logprobs, ref_logprobs = [], []
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -block_size:]
+        logits, _ = policy(idx_cond)
+        logits_last = logits[:, -1, :] / temperature
+        if top_k is not None:
+            v, _ = torch.topk(logits_last, top_k)
+            logits_last[logits_last < v[:, [-1]]] = float("-inf")
+        probs = F.softmax(logits_last, dim=-1)
+        next_id = torch.multinomial(probs, num_samples=1)
+        policy_lp = F.log_softmax(logits_last, dim=-1).gather(1, next_id).squeeze(-1)
+
+        ref_logits, _ = ref_model(idx_cond)
+        ref_lp = F.log_softmax(ref_logits[:, -1, :], dim=-1).gather(1, next_id).squeeze(-1)
+
+        idx = torch.cat([idx, next_id], dim=1)
+        policy_logprobs.append(policy_lp)
+        ref_logprobs.append(ref_lp)
+    return idx, torch.stack(policy_logprobs, dim=1), torch.stack(ref_logprobs, dim=1)
+
+
+def evaluate_actions_no_value(policy, idx, prompt_len, gen_len):
+    \"\"\"Same idea as PPO's evaluate_actions, but for a plain GPTModel with no value
+    head — returns only logprobs, no value estimate.\"\"\"
+    logits, _ = policy(idx[:, :-1])
+    action_logits = logits[:, prompt_len - 1 : prompt_len - 1 + gen_len, :]
+    actions = idx[:, prompt_len : prompt_len + gen_len]
+    logprobs = F.log_softmax(action_logits, dim=-1).gather(-1, actions.unsqueeze(-1)).squeeze(-1)
+    return logprobs
+"""))
+
+cells.append(code("""
+# TEST 3: group-relative advantage against a hand-computed toy group
+rewards = torch.tensor([[1.0, 0.0, 1.0, 0.0]])
+adv = compute_group_relative_advantage(rewards)
+# hand derivation: mean=0.5; unbiased std of [1,0,1,0] (ddof=1) = sqrt(1/3) = 0.5773502691896258
+mean, std = 0.5, 0.5773502691896258
+expected = torch.tensor([[(1.0 - mean) / (std + 1e-4), (0.0 - mean) / (std + 1e-4),
+                           (1.0 - mean) / (std + 1e-4), (0.0 - mean) / (std + 1e-4)]])
+assert torch.allclose(adv, expected, atol=1e-4), f"{adv} != {expected}"
+print(f"TEST 3a PASSED — group-relative advantage matches hand-computed toy group: {adv.tolist()}")
+
+# a zero-variance group must not blow up (the +1e-4 epsilon handles std=0)
+rewards_zero_var = torch.tensor([[1.0, 1.0, 1.0]])
+adv_zero_var = compute_group_relative_advantage(rewards_zero_var)
+assert torch.allclose(adv_zero_var, torch.zeros_like(adv_zero_var), atol=1e-2)
+print("TEST 3b PASSED — zero-variance group (all-identical rewards) does not produce NaN/inf")
+"""))
+
+cells.append(code("""
+# TEST 4: confirm no value head/critic is instantiated anywhere in the GRPO policy
+grpo_policy_probe = copy.deepcopy(sft_model).to(device)
+assert not hasattr(grpo_policy_probe, 'value_head'), \\
+    "GRPO policy must not have a value head — the group-relative baseline replaces it entirely"
+assert isinstance(grpo_policy_probe, GPTModel), \\
+    "GRPO policy must be a plain GPTModel, not wrapped in an actor-critic class"
+del grpo_policy_probe
+print("TEST 4 PASSED — GRPO policy is a plain GPTModel with no value head/critic")
+"""))
+
+cells.append(md("""
+### Question 2
+
+Part 3's PPO used `PPOActorCritic`, a wrapper adding a `value_head` to the policy. This
+notebook's `evaluate_actions_no_value` deliberately omits any equivalent. Given
+`docs/llm_training_pipeline_reference.html#s9`'s explanation of what a value function is
+*for* (variance reduction relative to a Monte-Carlo baseline), what specifically does GRPO
+give up by not having one, beyond the parameter count? Under what circumstances (about the
+task or the group size `G`) would you expect that trade-off to look worse?
+
+*Write your answer below:*
+
+"""))
+
+# Part 3 is appended here.
 
 # ─── WRITE ───────────────────────────────────────────────────────────────────
 nb['cells'] = cells
